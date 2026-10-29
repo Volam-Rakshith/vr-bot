@@ -1,24 +1,10 @@
 {
-  "templates": [
-    {
-      "id": "t_morning",
-      "name": "Good morning",
-      "text": "{{Good morning|Morning|Gm}} {first_name} ☀️ Have a great {day}!"
-    },
-    {
-      "id": "t_bday",
-      "name": "Birthday",
-      "text": "Happy birthday {name}! 🎂🎉 Wishing you an amazing year ahead. — {my_name}"
-    },
-    {
-      "id": "t_exam",
-      "name": "Exam reminder",
-      "text": "📚 Reminder: {name|everyone}, exam on {date}. All the best! 💪"
-    },
-    {
-      "id": "t_fest",
-      "name": "Festival",
-      "text": "Happy {festival} {first_name|}! ✨ Wishing you and your family joy. — {my_name}"
-    }
-  ]
+ "vrenc": 1,
+ "alg": "AES-256-GCM",
+ "kdf": "PBKDF2-SHA256",
+ "iter": 200000,
+ "salt": "5RtVii/pVJ8G+sfkv9k1wQ==",
+ "iv": "fLz3lNDlABloXEvj",
+ "z": 0,
+ "ct": "ivlKQC8LK5n+h0r1EtjKhJQGzZRQtTvYBYKGRkmrE6cTtr80tGlvM7tsryY6O+JDnpXPWFBII4+3NvZkuNnZ1x7fjc3vkbP8eQGIUyrMxwFadWKw8LCl/maPUo4HuPw2FAHCGaPTy3rt80//du2nFfSzJT3XNlw+E0u35w0zoC2fw2MnDhq+oIgdla3ouzp5admDIqfZBwoLzsp+jYoDot2TY88qphTMCnGQL9CdRHWsGl/jAZrNmsk5JmPg4PB7MGbq0fKfkvgBmmd0L9UJECz83aoOliafFY21jHyWFpqSyap25GApRYdTqfpUYMMnGS8SPkHOCBx4Y0bFrAtLmDBRbt0sbO377WeLVT9gCET6CafANGQMpAS0wwGCwg60b8TgMtikqnMMTRFa7SEBlGH58AukJDHSYVywQ1jSo8Md0Vyv1Rw6ywIep2SW8+wnN7bE3CkrwCkr714PuE7iFAjCzFjc61T/j343rWhVu/+/ZWjdEZoHfWq3KIs/+E16ucbVIi1Ew9o5QNADGh3CvZ5vZ6UeNVdJT+Pfaj3qj5zg9A3Rg1bKjwwG9tu0v3lM5FUqzWGiP3JAh8Baf4/ROCIL58bcxKjCaOqFxo4BM7rX1FhsITGu7usISZvwMW4SewVPfTw34q0Xz+BaHWHEtGqXmGO1HYt44vFmr7ufApa8SQ=="
 }
