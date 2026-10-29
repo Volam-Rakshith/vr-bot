@@ -1,0 +1,61 @@
+{
+  "defaultTime": "00:00",
+  "items": {
+    "diwali": {
+      "enabled": true,
+      "time": "07:00",
+      "to": [
+        {
+          "type": "tag",
+          "tag": "family"
+        },
+        {
+          "type": "tag",
+          "tag": "friends"
+        }
+      ],
+      "message": "Happy Diwali {first_name|}! 🪔 May the festival of lights fill your home with happiness. — {my_name}"
+    },
+    "new-year": {
+      "enabled": true,
+      "time": "00:00",
+      "to": [
+        {
+          "type": "tag",
+          "tag": "friends"
+        }
+      ],
+      "message": "Happy New Year {first_name|}! 🎆 Have an amazing {year} ✨"
+    },
+    "sankranti": {
+      "enabled": true,
+      "time": "07:00",
+      "to": [
+        {
+          "type": "tag",
+          "tag": "family"
+        }
+      ],
+      "message": "Happy Sankranti {first_name|}! 🪁"
+    }
+  },
+  "custom": [
+    {
+      "id": "vr-anniversary",
+      "name": "VR DEVELOPMENTS anniversary",
+      "emoji": "🚀",
+      "dates": {
+        "2027": "2027-06-01"
+      },
+      "enabled": false,
+      "time": "10:00",
+      "to": [
+        {
+          "type": "tag",
+          "tag": "clients"
+        }
+      ],
+      "message": "🚀 VR DEVELOPMENTS turns one today — thank you for being with us, {first_name|}!"
+    }
+  ]
+}

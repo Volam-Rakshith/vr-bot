@@ -1,0 +1,38 @@
+{
+  "_note": "Examples have \"example\": true and are NEVER messaged. Delete them in the panel (Contacts → Delete examples) and add your real contacts.",
+  "contacts": [
+    {
+      "id": "c_amma",
+      "name": "Amma",
+      "number": "+91 90000 00001",
+      "birthday": "1980-03-12",
+      "tags": [
+        "family"
+      ],
+      "header": "off",
+      "example": true
+    },
+    {
+      "id": "c_saiteja",
+      "name": "Saiteja",
+      "number": "+91 90000 00002",
+      "birthday": "2007-11-02",
+      "tags": [
+        "friends"
+      ],
+      "header": "default",
+      "example": true
+    },
+    {
+      "id": "c_client",
+      "name": "Client — Ravi",
+      "number": "+91 90000 00003",
+      "birthday": "",
+      "tags": [
+        "clients"
+      ],
+      "header": "on",
+      "example": true
+    }
+  ]
+}

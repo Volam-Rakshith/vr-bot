@@ -1,0 +1,33 @@
+{
+  "rules": [
+    {
+      "id": "r_price",
+      "enabled": true,
+      "match": "contains",
+      "pattern": "price, cost, charges, rate",
+      "caseSensitive": false,
+      "reply": "Hi {first_name|}! 👋 Thanks for asking. Please share what you need (website / app / bot) and I'll send a quote soon. — VR DEVELOPMENTS",
+      "where": "private",
+      "contacts": [],
+      "tags": [],
+      "exclude": [],
+      "cooldownMinutes": 360
+    },
+    {
+      "id": "r_hi",
+      "enabled": false,
+      "match": "regex",
+      "pattern": "^(hi|hello|hey|hii+)\\b",
+      "caseSensitive": false,
+      "reply": [
+        "Hey! 👋",
+        "Hi {first_name|}! 😊"
+      ],
+      "where": "private",
+      "contacts": [],
+      "tags": [],
+      "exclude": [],
+      "cooldownMinutes": 720
+    }
+  ]
+}

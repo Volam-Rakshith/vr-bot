@@ -1,0 +1,23 @@
+{
+  "_note": "Keys are WhatsApp group IDs (the panel lists your groups after the first run).",
+  "groups": {
+    "PICK-A-GROUP@g.us": {
+      "name": "AIML Class (example)",
+      "welcome": {
+        "enabled": true,
+        "message": "Welcome {name} to {group}! 👋 Please read the rules: send !rules"
+      },
+      "antiLink": {
+        "enabled": true,
+        "action": "warn",
+        "warnLimit": 3,
+        "allowDomains": [
+          "github.com",
+          "youtube.com"
+        ]
+      },
+      "rulesText": "1. Be respectful\n2. No spam or random links\n3. Only class-related messages",
+      "tagallAdminsOnly": true
+    }
+  }
+}

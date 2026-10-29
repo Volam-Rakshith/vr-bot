@@ -1,0 +1,27 @@
+{
+  "name": "vr-bot",
+  "version": "1.0.0",
+  "description": "VR Bot by VR DEVELOPMENTS — free WhatsApp automation that runs on GitHub Actions, with a phone control panel on GitHub Pages.",
+  "author": "VR DEVELOPMENTS (Volam Rakshith)",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "homepage": "https://github.com/Volam-Rakshith/vr-bot",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/index.js run",
+    "pair": "node src/index.js pair",
+    "plan": "node src/index.js plan 7",
+    "test": "node --test test/*.test.js",
+    "check": "node scripts/check.js"
+  },
+  "dependencies": {
+    "baileys": "7.0.0-rc14",
+    "pino": "^9.0.0",
+    "qrcode-terminal": "^0.12.0",
+    "sharp": "^0.34.0",
+    "pdf-lib": "^1.17.1"
+  }
+}

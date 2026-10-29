@@ -1,0 +1,37 @@
+# VR Bot by VR DEVELOPMENTS — run this ONCE to link WhatsApp (and again only if you get logged out).
+name: VR Bot — Pair WhatsApp
+
+on:
+  workflow_dispatch:
+    inputs:
+      method:
+        description: 'How to link'
+        type: choice
+        options: [pairing-code, qr]
+        default: pairing-code
+
+permissions:
+  contents: write
+
+concurrency:
+  group: vr-bot-whatsapp
+  cancel-in-progress: false
+
+jobs:
+  pair:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --omit=dev --no-audit --no-fund
+      - name: Link WhatsApp — open this step to see your code
+        run: node src/index.js pair
+        env:
+          VR_PASSPHRASE: ${{ secrets.VR_PASSPHRASE }}
+          BOT_NUMBER: ${{ secrets.BOT_NUMBER }}
+          OWNER_NUMBER: ${{ secrets.OWNER_NUMBER }}
+          VR_PAIR_METHOD: ${{ inputs.method == 'qr' && 'qr' || 'code' }}

@@ -1,0 +1,49 @@
+{
+  "version": 1,
+  "botName": "VR Bot",
+  "myName": "Rakshith",
+  "timezone": "Asia/Kolkata",
+  "paused": false,
+  "features": {
+    "scheduled": true,
+    "groupScheduler": true,
+    "birthdays": true,
+    "festivals": true,
+    "autoReply": true,
+    "ai": false,
+    "away": false,
+    "broadcast": true,
+    "groupTools": true,
+    "commands": true,
+    "voiceToText": false,
+    "mediaSave": false,
+    "alerts": true,
+    "followup": false,
+    "summary": true,
+    "failureAlerts": true
+  },
+  "header": {
+    "enabled": true,
+    "text": "🤖 *VR Bot* is sending:"
+  },
+  "alerts": {
+    "github": {
+      "enabled": true,
+      "user": "Volam-Rakshith",
+      "repos": [],
+      "everyMinutes": 60
+    },
+    "form": {
+      "enabled": false,
+      "ntfyTopic": ""
+    }
+  },
+  "summary": {
+    "time": "21:30"
+  },
+  "birthdays": {
+    "time": "00:00",
+    "message": "Happy birthday {name}! 🎂🎉 Have an amazing year ahead!",
+    "remindMe": true
+  }
+}

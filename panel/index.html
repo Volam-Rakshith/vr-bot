@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' https://api.github.com; img-src 'self' blob: data:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; manifest-src 'self'; worker-src 'self'">
+<meta name="theme-color" content="#07080d">
+<meta name="description" content="VR Bot control panel — schedules, contacts, festivals and auto-replies for your WhatsApp bot. By VR DEVELOPMENTS.">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="VR Bot">
+<title>VR Bot — Control Panel · VR DEVELOPMENTS</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="32x32" href="icons/favicon-32.png">
+<link rel="icon" type="image/png" sizes="64x64" href="icons/favicon-64.png">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<a class="skip" href="#view">Skip to content</a>
+<header class="top" id="top">
+  <a class="brand" href="#/home" aria-label="VR Bot home">
+    <img src="icons/logo.png" alt="" width="34" height="34">
+    <span class="brand-text"><strong>VR Bot</strong><small>by VR DEVELOPMENTS</small></span>
+  </a>
+  <div class="top-right" id="topRight"></div>
+</header>
+<main id="view" tabindex="-1" aria-live="polite">
+  <div class="boot"><img src="icons/logo.png" alt="" width="72" height="72"><p>Loading VR Bot…</p></div>
+</main>
+<nav class="tabs" id="tabs" aria-label="Main" hidden>
+  <a href="#/home" data-tab="home"><span aria-hidden="true">🏠</span>Home</a>
+  <a href="#/schedules" data-tab="schedules"><span aria-hidden="true">🗓️</span>Schedules</a>
+  <a href="#/contacts" data-tab="contacts"><span aria-hidden="true">👥</span>Contacts</a>
+  <a href="#/replies" data-tab="replies"><span aria-hidden="true">💬</span>Replies</a>
+  <a href="#/more" data-tab="more"><span aria-hidden="true">☰</span>More</a>
+</nav>
+<div class="toast" id="toast" role="status" hidden></div>
+<footer class="foot" id="foot">
+  <img src="icons/logo.png" alt="" width="20" height="20"> © <span id="year">2026</span> VR DEVELOPMENTS · Turning Ideas Into Innovation
+</footer>
+<script type="module" src="app.js"></script>
+</body>
+</html>

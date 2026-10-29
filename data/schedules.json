@@ -1,0 +1,123 @@
+{
+  "schedules": [
+    {
+      "id": "s_morning_amma",
+      "name": "Good morning Amma",
+      "enabled": true,
+      "example": true,
+      "to": [
+        {
+          "type": "contact",
+          "id": "c_amma"
+        }
+      ],
+      "templateId": "t_morning",
+      "message": "",
+      "time": "07:00",
+      "repeat": {
+        "type": "daily"
+      },
+      "skipDays": [
+        0
+      ],
+      "skipDates": [],
+      "start": null,
+      "end": null,
+      "humanDelay": {
+        "enabled": false,
+        "minutes": 3
+      },
+      "header": "default"
+    },
+    {
+      "id": "s_class_reminder",
+      "name": "Class group — attendance reminder",
+      "enabled": true,
+      "example": true,
+      "to": [
+        {
+          "type": "group",
+          "id": "PICK-A-GROUP@g.us",
+          "name": "AIML Class"
+        }
+      ],
+      "message": "⏰ Classes start at 9:30 today. Don't be late!",
+      "time": "08:30",
+      "repeat": {
+        "type": "weekly",
+        "days": [
+          1,
+          2,
+          3,
+          4,
+          5
+        ]
+      },
+      "skipDays": [],
+      "skipDates": [
+        "2026-11-09"
+      ],
+      "start": "2026-11-01",
+      "end": "2027-04-30",
+      "humanDelay": {
+        "enabled": false,
+        "minutes": 3
+      },
+      "header": "default"
+    },
+    {
+      "id": "s_exam",
+      "name": "Exam reminder (one time)",
+      "enabled": true,
+      "example": true,
+      "to": [
+        {
+          "type": "tag",
+          "tag": "friends"
+        }
+      ],
+      "templateId": "t_exam",
+      "message": "",
+      "time": "19:00",
+      "repeat": {
+        "type": "once",
+        "date": "2026-12-01"
+      },
+      "skipDays": [],
+      "skipDates": [],
+      "start": null,
+      "end": null,
+      "humanDelay": {
+        "enabled": true,
+        "minutes": 5
+      },
+      "header": "default"
+    },
+    {
+      "id": "s_rent",
+      "name": "Monthly: pay mobile recharge",
+      "enabled": true,
+      "example": true,
+      "to": [
+        {
+          "type": "owner"
+        }
+      ],
+      "message": "📱 Reminder: recharge your mobile today.",
+      "time": "10:00",
+      "repeat": {
+        "type": "monthly",
+        "day": 1
+      },
+      "skipDays": [],
+      "skipDates": [],
+      "start": null,
+      "end": null,
+      "humanDelay": {
+        "enabled": false,
+        "minutes": 3
+      },
+      "header": "default"
+    }
+  ]
+}

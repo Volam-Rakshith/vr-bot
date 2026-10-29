@@ -1,0 +1,70 @@
+# VR Bot by VR DEVELOPMENTS — the worker. Runs every 30 minutes, sends what is due ON THE MINUTE,
+# reads new messages, then saves its (encrypted) state. You normally never touch this file.
+name: VR Bot — Run
+
+on:
+  schedule:
+    # Every 30 min at :13 and :43 (GitHub is busiest at :00, so off-peak minutes start more reliably).
+    - cron: '13,43 * * * *'
+  workflow_dispatch:
+    inputs:
+      action:
+        description: 'What to do'
+        type: choice
+        options: [run, test-send, send-now]
+        default: run
+      target:
+        description: 'Schedule ID (only for test-send / send-now)'
+        required: false
+        default: ''
+      lookahead:
+        description: 'Minutes to look ahead (leave empty for the default)'
+        required: false
+        default: ''
+  repository_dispatch:
+    types: [vr-alert, contact-form]
+
+permissions:
+  contents: write   # save encrypted state to the vr-state / vr-media branches
+  actions: write    # start a relay run when a message is due soon
+
+concurrency:
+  group: vr-bot-whatsapp     # only one WhatsApp connection at a time (shared with the pairing workflow)
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 110
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install
+        run: npm ci --omit=dev --no-audit --no-fund
+
+      - name: Run VR Bot
+        timeout-minutes: 95
+        run: node src/index.js run
+        env:
+          VR_PASSPHRASE: ${{ secrets.VR_PASSPHRASE }}
+          BOT_NUMBER: ${{ secrets.BOT_NUMBER }}
+          OWNER_NUMBER: ${{ secrets.OWNER_NUMBER }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          VR_ACTION: ${{ inputs.action || 'run' }}
+          VR_TARGET: ${{ inputs.target }}
+          VR_LOOKAHEAD: ${{ inputs.lookahead }}
+
+      - name: Save session & state (always runs, even after an error)
+        if: always()
+        timeout-minutes: 5
+        run: node src/index.js save
+        env:
+          VR_PASSPHRASE: ${{ secrets.VR_PASSPHRASE }}

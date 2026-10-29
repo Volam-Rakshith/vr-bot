@@ -1,0 +1,24 @@
+{
+  "templates": [
+    {
+      "id": "t_morning",
+      "name": "Good morning",
+      "text": "{{Good morning|Morning|Gm}} {first_name} ☀️ Have a great {day}!"
+    },
+    {
+      "id": "t_bday",
+      "name": "Birthday",
+      "text": "Happy birthday {name}! 🎂🎉 Wishing you an amazing year ahead. — {my_name}"
+    },
+    {
+      "id": "t_exam",
+      "name": "Exam reminder",
+      "text": "📚 Reminder: {name|everyone}, exam on {date}. All the best! 💪"
+    },
+    {
+      "id": "t_fest",
+      "name": "Festival",
+      "text": "Happy {festival} {first_name|}! ✨ Wishing you and your family joy. — {my_name}"
+    }
+  ]
+}
