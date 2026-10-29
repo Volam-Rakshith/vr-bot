@@ -1,0 +1,11 @@
+{
+ "about": "Password check for VR Bot by VR DEVELOPMENTS. Safe to be public.",
+ "vrenc": 1,
+ "alg": "AES-256-GCM",
+ "kdf": "PBKDF2-SHA256",
+ "iter": 200000,
+ "salt": "LpAtgGpf+5+n+0MqUi3V/A==",
+ "iv": "wXwwwyUwtRPlGHs4",
+ "z": 0,
+ "ct": "JvX9hGHSyO+wFwa+02WO5tS11uqEKLndmvpVShfSqvjTd6qufQu7+3niT6O9XKGCvoacM2w+TgYtb6Fwh12X7lHS7XzH"
+}
