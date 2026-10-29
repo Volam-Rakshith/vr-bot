@@ -5,6 +5,15 @@ import fs from 'node:fs';
 import { env } from './env.js';
 import { log } from './log.js';
 
+// Keep WhatsApp's encryption-library chatter (session keys) out of public Actions logs.
+{
+  const quiet = /^(Closing session|Closing open session|Removing old closed session|Opening session|Migrating session|Session already|Decrypted message with closed session|Failed to decrypt message with any known session)/;
+  for (const m of ['log', 'info', 'warn', 'error', 'debug']) {
+    const orig = console[m].bind(console);
+    console[m] = (...a) => { if (typeof a[0] === 'string' && quiet.test(a[0])) return; orig(...a); };
+  }
+}
+
 const cmd = process.argv[2] || 'run';
 const fail = (e) => { log.error(e?.message || String(e)); process.exitCode = 1; };
 
