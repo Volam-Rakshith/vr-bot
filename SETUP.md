@@ -130,7 +130,7 @@ Keep WhatsApp open on the phone that has the `BOT_NUMBER` SIM.
 - **Replies:** add auto-reply rules, set up Away mode.
 - **Settings:** switch features on/off, the 🤖 "VR Bot is sending" header, daily summary time.
 
-From now on the bot runs by itself every 30 minutes. You never need to touch GitHub again unless WhatsApp logs it out.
+From now on the bot runs by itself, all day (Always on). You never need to touch GitHub again unless WhatsApp logs it out.
 
 ## 12. (Optional) AI replies & voice-to-text — free Groq key
 
@@ -164,11 +164,11 @@ Free plan (checked Oct 2026): `openai/gpt-oss-120b` 30 requests/min, 1,000/day; 
 
 **T10 — A message didn't send.** Check in this order: item marked **EXAMPLE**? (never sent) · schedule paused or **Pause everything** on? · the feature switched off in Settings? · Panel **Logs → Sent** shows the reason (e.g. "number is not on WhatsApp") · number has the country code.
 
-**T11 — A message came late.** Panel **Logs → Runs**. GitHub sometimes starts runs late under heavy load; the bot catches up (up to 3 hours) and marks it "late". Keep **Settings → Timing → Relay runs** ON.
+**T11 — A message came late.** Panel **Logs → Runs**. GitHub sometimes starts runs late under heavy load; the bot catches up (up to 3 hours) and marks it "late". Keep **Settings → Timing → Always on** ON. If Actions shows no "VR Bot — Run" in progress, tap **▶ Run now** in the panel — that restarts the chain.
 
-**T12 — Replies/commands take long.** Expected: replies happen on the next check (≤ ~30 min). Scheduled messages are the exact ones.
+**T12 — Replies/commands take long.** With Always on, replies come within seconds (except during the ~1–2 min hand-over about every 80 min). With it off or while paused, replies wait for the next check.
 
-**T13 — Runs stopped completely.** GitHub pauses scheduled workflows in public repos after 60 days without activity (the bot's heartbeat prevents this). Fix: **Actions → VR Bot — Run → Enable workflow**. Also check GitHub didn't email you about Actions being disabled.
+**T13 — Runs stopped completely.** GitHub pauses scheduled workflows in public repos after 60 days without activity (the bot's heartbeat prevents this). Fix: **Actions → VR Bot — Watchdog → Enable workflow** (and VR Bot — Run if it shows disabled). Also check GitHub didn't email you about Actions being disabled.
 
 **T14 — Everyone sees "Waiting for this message".** Encryption keys got out of sync (usually after a crashed run). It normally fixes itself in a few messages. If not: pair again (step 9).
 

@@ -22,7 +22,7 @@ test('expandTargets: contacts, tags, groups, owner; skips examples; dedupes', ()
 
 test('daily schedule → one job per occurrence with rendered text, header off for personal', () => {
   const d = base({ schedules: [{ id: 's1', name: 'GM Amma', to: [{ type: 'contact', id: 'c1' }], templateId: 't1', time: '07:00', repeat: { type: 'daily' }, skipDays: [0] }] });
-  d.settings.features.summary = false; d.settings.features.birthdays = false;
+  d.settings.features.summary = false; d.settings.features.birthdays = false; d.settings.weekly.enabled = false;
   const jobs = buildJobs(d, ist('2026-10-31', '00:00'), ist('2026-11-03', '00:00'));
   assert.deepEqual(jobs.map((j) => j.date), ['2026-10-31', '2026-11-02']);
   assert.equal(jobs[0].text, 'Good morning Amma ☀️');
@@ -64,7 +64,7 @@ test('birthdays: exact midnight IST, age, Feb 29 → Feb 28, no header by defaul
 
 test('festivals: built-in Diwali 2026 to a tag at chosen time', () => {
   const d = base({ festivals: { items: { diwali: { enabled: true, time: '07:00', to: [{ type: 'tag', tag: 'family' }], message: 'Happy {festival} {first_name}!' } } } });
-  d.settings.features.summary = false; d.settings.features.birthdays = false;
+  d.settings.features.summary = false; d.settings.features.birthdays = false; d.settings.weekly.enabled = false;
   const jobs = buildJobs(d, ist('2026-11-08', '00:00'), ist('2026-11-09', '00:00'));
   assert.equal(jobs.length, 1);
   assert.equal(jobs[0].text, 'Happy Diwali Amma!');

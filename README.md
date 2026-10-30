@@ -23,8 +23,13 @@ GitHub Actions does the work · GitHub Pages hosts your phone control panel.</p>
 | 🤖 | **"VR Bot is sending" header** — optional first line, on by default for groups/lists/alerts, off for personal wishes; per schedule & per contact override | — |
 | ↩️ | **"No reply" follow-up** after X days for chosen people | Exact minute |
 | 📊 | **Daily summary** to you — who messaged, today's sends, failures, tomorrow | Exact minute |
-| 🔔 | **Alerts to you** — GitHub stars/forks/issues/PRs + website contact form | Next check (≤ 30 min) |
-| ⚡ | **Auto-reply rules** — exact / contains / starts-with / regex, global or per tag, cooldown | ⏱ Next check (≤ 30 min) |
+| 🗓️ | **Weekly report** to you (Sunday 8 PM by default) — top people, busiest groups, vs last week, busiest hour. Counts only, never message text | Exact minute |
+| 📸 | **Auto status** — posts a WhatsApp text status (built-in motivational quotes with no repeats, AI-fresh lines, your own texts, or a photo link) on chosen days at a set time, to all / only these / all except these. Off by default | Exact minute |
+| 🎉 | **Special days** — on festivals and special days (Sankranti, Ugadi, Eid, Bathukamma, Diwali, Independence Day, Teachers' Day, World Savings Day… 33 days, exact dates for 2026–2027) the auto status is a ready-made picture card with a caption instead of the quote. Turn any day off or change its caption; still one status a day. On whenever Auto status is on | Exact minute |
+| 🔕 | **Busy mode** — `!busy 2h`, `!busy until 5pm`, `!busy off` or the panel switch: "VR's busy, back by 5:00 PM 🙏" once per chat, **only in the chats/groups you pick**; turns off by itself and tells you | Within seconds (Always on) |
+| 🧸 | **Stickers & GIFs ignored** — auto-replies, AI, away and busy never react to stickers, GIFs, reactions, deleted messages or polls (switch in Replies) | — |
+| 🔔 | **Alerts to you** — GitHub stars/forks/issues/PRs + website contact form | Within seconds (Always on) |
+| ⚡ | **Auto-reply rules** — exact / contains / starts-with / regex, global or per tag, cooldown | Within seconds (Always on) |
 | 🧠 | **AI replies in your style** (Groq free API) — style prompt + example chats + memory | ⏱ Next check |
 | 🌙 | **Away mode** — message + optional night window, `!away` / `!back` from WhatsApp | ⏱ Next check |
 | 🛡️ | **Group tools** — welcome new members, anti-link (warn / delete / remove if admin), `!tagall`, `!rules` | ⏱ Next check |
@@ -34,7 +39,7 @@ GitHub Actions does the work · GitHub Pages hosts your phone control panel.</p>
 
 Every feature has an on/off switch in the panel. Failures are sent to your own WhatsApp.
 
-> **"Exact" vs "next check" — please read.** GitHub Actions is not a server that is always on. The bot wakes up every 30 minutes. For **scheduled** things it wakes up *early*, stays connected and sends **on the exact minute**. **Replies** to messages people send you (auto-reply, AI, away, commands, group tools) happen at the next wake-up — up to ~30 minutes later — unless a run happens to be connected at that moment, then they are instant.
+> **"Always on" — please read.** GitHub Actions is not a server, so the bot keeps itself alive: each run stays connected for ~80 minutes and starts the next run before it ends (Settings → Timing → **Always on**, on by default). Scheduled messages go out **on the exact minute**, and replies to incoming messages (auto-reply, AI, away, commands, group tools) happen **within seconds** — except for a short ~1–2 min hand-over gap about every 80 minutes (messages that arrive then are answered when the next run connects). Rows marked "⏱ Next check" above are near-instant with Always on. With Always on switched off (or while paused), the bot only wakes when GitHub's timer fires, which can be late by hours on a quiet repo.
 
 ## 📱 The control panel
 
@@ -51,10 +56,11 @@ Dashboard (next sends, last run, failures) · Schedules (create / edit / pause /
 
 ## ⏱️ How exact is "exact"?
 
-- Each run looks **45 minutes ahead**, connects, then **waits and sends at hh:mm:00** (usually within a few seconds).
-- Before it finishes, if another message is due soon, it **starts a relay run** that waits for it — so you don't depend on GitHub's timer being on time.
+- A run is **always connected** and **sends at hh:mm:00** (usually within a few seconds).
+- Each run lives ~80 min, then **starts the next run itself** (it never hands over when a send is due in the next 6 minutes). GitHub lets only one run hold the WhatsApp connection and keeps at most one waiting, so runs never pile up. You don't depend on GitHub's timer at all.
+- A small **Watchdog** workflow (every ~20 min, best-effort) restarts the chain if it ever stops (e.g. GitHub outage).
 - Every send is recorded in an encrypted **sent-log** (the dedupe ledger), so a message is **never sent twice** and a run that starts late still sends what was missed (up to 3 hours late by default, marked "late" in Logs).
-- GitHub's own docs say scheduled runs "can be delayed during periods of high loads" and that "some queued jobs may be dropped". The relay + 45-min look-ahead + catch-up make that rare, but during a GitHub outage a message can be late. You'll see it in Logs and in your daily summary.
+- GitHub's own docs say scheduled runs "can be delayed during periods of high loads" and that "some queued jobs may be dropped". That's why the bot no longer relies on the timer: the always-on chain + watchdog + catch-up make a late message rare, but during a GitHub outage a message can be late. You'll see it in Logs and in your daily summary.
 - Lists send one by one with 8–20 s gaps (safer for your number), so the 50th person gets it a few minutes after the first.
 
 ## 🔐 Privacy & security (your repo is public)
@@ -77,7 +83,7 @@ GitHub Pages is free only for **public** repos, and Actions minutes are free and
 ## ⌨️ Commands (in WhatsApp)
 
 Everyone (switchable): `!help` · `!weather Hyderabad` · `!sticker` (on/reply to an image or short video) · `!pdf` (send images, then `!pdf`) · `!yt <link>` (experimental, off) · in groups: `!tagall <msg>` (admins) · `!rules`
-Only you (from your own phone or "Message yourself"): `!away <msg>` · `!back` · `!pause` · `!resume` · `!status` · `!text` (reply to a voice note)
+Only you (from your own phone or "Message yourself"): `!away <msg>` · `!back` · `!pause` · `!resume` · `!status` · `!text` (reply to a voice note) · `!busy 2h` / `!busy 30m` / `!busy until 5pm` / `!busy off`
 
 ## 🔔 Website contact form → WhatsApp
 
@@ -98,6 +104,8 @@ For your own scripts you can also trigger an alert with a GitHub token: `POST /r
 - **Linked devices log out if your phone doesn't use WhatsApp for 14 days** (WhatsApp's rule). Open WhatsApp on the phone at least once every two weeks. If WhatsApp ever logs the bot out, the panel shows a red banner and you run "Pair WhatsApp" again (2 minutes).
 - **GitHub's terms:** GitHub says Actions should not be used for things unrelated to the software project in the repo, or for heavy "serverless app" use. VR Bot is your own project and stays low-load (short runs, mostly sleeping), but it is a grey area — GitHub could slow down or disable Actions on the repo. Don't run copies for other people.
 - **Scheduled workflows in public repos stop after 60 days without activity.** The bot commits a small heartbeat every 20 days to prevent this.
+- **Auto status** is posted by an unofficial client. WhatsApp may treat frequent automated statuses to many people as spam, so keep it to once a day, keep the audience to people who know you, and start with "Post test status now". Statuses go only to the people in the list the bot sends (your Contacts tab, optionally people who texted you in the last 30 days), capped at 500.
+- **Special days** use the same audience and the same one-status-a-day limit. The picture cards live in `panel/days/` (no extra download at run time). If a picture can't be posted, the caption goes out as a text status instead. Eid dates depend on the moon and can move by a day; turn the day off in the panel if your area celebrates on a different day.
 - **`!yt`**: YouTube often blocks GitHub's servers ("confirm you're not a bot") — experimental.
 - **Saved media/statuses**: only what arrives while the bot is connected or in the backlog it receives on connect; small files only.
 - **Festival dates** for lunar festivals (and Eid, which depends on moon sighting) must be checked every January (Panel → Festivals → tap → edit date).

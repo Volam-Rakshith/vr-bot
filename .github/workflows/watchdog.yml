@@ -1,0 +1,32 @@
+# VR Bot by VR DEVELOPMENTS — the safety net. Every ~20 minutes (when GitHub's timer fires) it
+# checks that a "VR Bot — Run" is alive and starts one if not. Takes ~10 seconds, never touches
+# WhatsApp. You normally never touch this file.
+name: VR Bot — Watchdog
+
+on:
+  schedule:
+    # Off-peak minutes (GitHub is busiest at :00). GitHub may skip some — that's OK, it's a backup.
+    - cron: '7,27,47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: write    # start "VR Bot — Run" if it is not running
+  contents: read
+
+concurrency:
+  group: vr-bot-watchdog
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v7
+        with:
+          sparse-checkout: src
+      - name: Is the bot running? Start it if not
+        run: node src/chain.js watchdog
+        env:
+          GITHUB_TOKEN: ${{ github.token }}

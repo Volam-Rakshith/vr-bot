@@ -4,7 +4,9 @@
 // (up to ~30 minutes later) — or live, if a run happens to be connected at that moment.
 // © VR DEVELOPMENTS
 import { getContentType, downloadMediaMessage, normalizeMessageContent, WAMessageStubType } from 'baileys';
-import { findRule, pickReply } from '../panel/shared/rules.js';
+import { findRule, pickReply, inScope, featureScope, pickReaction, REACTIONS, messageKind, shouldRespond, noiseText } from '../panel/shared/rules.js';
+import { parseBusy, busyNow, busyText, busyTimeText } from '../panel/shared/busy.js';
+import { recordWeekly } from '../panel/shared/report.js';
 import { renderTemplate, firstName, headerOn } from '../panel/shared/templates.js';
 import { localDate, localTime, inDailyWindow } from '../panel/shared/time.js';
 import { normalizeNumber, maskNumber } from '../panel/shared/defaults.js';
@@ -15,6 +17,8 @@ import { weather, toSticker, imagesToPdf, ytAudio, helpText } from './features/c
 import { GroupTools } from './features/groups.js';
 import { env } from './env.js';
 
+// Reactions, deleted/edited messages and other system messages are never answered. Stickers, GIFs,
+// polls and media without text are not answered by replies/AI/busy either (see shouldRespond).
 const IGNORE = new Set(['protocolMessage', 'reactionMessage', 'senderKeyDistributionMessage', 'messageContextInfo', 'pollUpdateMessage', 'keepInChatMessage', 'pinInChatMessage', 'encReactionMessage', 'editedMessage']);
 const textOf = (c) => c?.conversation || c?.extendedTextMessage?.text || c?.imageMessage?.caption || c?.videoMessage?.caption || c?.documentMessage?.caption || '';
 
@@ -25,6 +29,11 @@ export function isAwayActive(settings, status, nowMs) {
   const w = settings.away?.window;
   if (!w?.enabled) return true; // feature on, no window → always away
   return inDailyWindow(localTime(nowMs, settings.timezone), w.from, w.to);
+}
+
+/** Who/where a message came from, for the per-chat controls (panel/shared/rules.js → inScope). */
+function scopeCtx(it) {
+  return { isGroup: !!it.isGroup, groupId: it.isGroup ? it.chat : undefined, contactId: it.contact?.id, tags: it.contact?.tags || [] };
 }
 
 export class Incoming {
@@ -78,7 +87,12 @@ export class Incoming {
       const type = content ? getContentType(content) : null;
       const isGroup = !!isJidGroup(chat);
       const it = { msg, id, chat, ts, content, type, isGroup, text: textOf(content).trim(), fromMe: !!msg.key.fromMe, status: chat === 'status@broadcast' };
-      if (it.status) { items.push(it); continue; }
+      it.kind = messageKind(content, type); // message | sticker | gif | reaction | protocol | poll | vote | empty
+      if (it.status) {
+        it.senderNum = await this.wa.pnFor(msg.key.participant || '', msg.key.participantAlt);
+        it.contact = contactsByNum.get(it.senderNum) || null;
+        items.push(it); continue;
+      }
       if (isGroup) {
         it.senderJid = msg.key.participant || msg.participant || '';
         it.senderNum = await this.wa.pnFor(it.senderJid, msg.key.participantAlt);
@@ -99,6 +113,11 @@ export class Incoming {
         const k = isGroup ? chat : it.senderNum;
         const nm = isGroup ? (this.state.status.groups.find((g) => g.id === chat)?.name || 'group') : (it.contact?.name || msg.pushName || '');
         ib.people[k] = { name: nm, masked: isGroup ? 'group' : maskNumber(it.senderNum), count: (ib.people[k]?.count || 0) + 1, last: ts };
+        // weekly report: one more message from this chat today (counts only — never the text)
+        if (['message', 'sticker', 'gif', 'poll'].includes(it.kind) && k) {
+          this.state.status.weekly = this.state.status.weekly || {};
+          recordWeekly(this.state.status.weekly, { key: k, name: nm, isGroup, ts, tz: S.timezone });
+        }
       }
       items.push(it);
     }
@@ -111,38 +130,48 @@ export class Incoming {
     for (const it of items) {
       try {
         handled++;
-        if (it.status) { await this.saveMedia(it, S, true); continue; }
+        if (it.status) { if (inScope(featureScope(S, 'media'), scopeCtx(it))) await this.saveMedia(it, S, true); continue; }
         // group "joined" system messages → welcome
         if (it.isGroup && F.groupTools && [WAMessageStubType.GROUP_PARTICIPANT_ADD, WAMessageStubType.GROUP_PARTICIPANT_INVITE, WAMessageStubType.GROUP_PARTICIPANT_ACCEPT].includes(it.msg.messageStubType)) {
           if (now - it.ts < maxAge) await this.participants({ id: it.chat, action: 'add', participants: it.msg.messageStubParameters || [] });
           continue;
         }
         if (!it.type || IGNORE.has(it.type)) continue;
-        if (F.commands) this.noteImage(it);
         const fresh = now - it.ts < maxAge;
         const prefix = S.commands?.prefix || '!';
         const isCmd = it.text.startsWith(prefix);
         const isOwner = it.fromMe || (owner && it.senderNum === owner);
+        // Every feature below only acts in the chats/groups picked for it in the panel (see inScope).
+        const sc = scopeCtx(it);
+        if (F.commands && (isOwner || inScope(featureScope(S, 'commands'), sc))) this.noteImage(it);
 
-        if (!it.fromMe && F.mediaSave && S.media?.chats) await this.saveMedia(it, S, false);
+        if (!it.fromMe && F.mediaSave && S.media?.chats && inScope(featureScope(S, 'media'), sc)) await this.saveMedia(it, S, false);
 
         if (it.fromMe) {
           if (isCmd && fresh) await this.command(it, S, F, true);
           continue;
         }
         if (!fresh) continue;
-        if (isCmd && F.commands) { await this.command(it, S, F, isOwner); continue; }
+        if (isCmd && F.commands && (it.kind === 'message' || it.kind === 'gif')) { await this.command(it, S, F, isOwner); continue; }
+        // Stickers, GIFs, polls and photos/videos without text get no reply, unless
+        // Replies → "Also respond to stickers & GIFs" is on (then stickers & GIFs count as messages).
+        const canReply = shouldRespond(it, { stickers: !!S.replies?.stickers });
+        it.aiText = it.kind === 'message' ? it.text : noiseText(it);
+        const busy = busyNow(S, this.state.status, now);
         if (it.isGroup) {
           if (F.groupTools && it.text) await this.tools().antiLink(it.msg, it.text, it.chat, it.senderJid).catch((e) => log.warn(`anti-link: ${e.message}`));
-          if (F.autoReply && it.text) await this.autoReply(it, data, true);
+          if (canReply && busy.active && await this.busyReply(it, S, busy, true)) continue;
+          if (F.autoReply && canReply && it.text && await this.autoReply(it, data, true)) continue;
+          if (F.ai && canReply && it.aiText && inScope(featureScope(S, 'ai'), sc) && this.talksToMe(it)) aiQueue.set(it.chat, it); // picked groups: only when @mentioned / replied to
           continue;
         }
         // private chat
         if (S.replies?.skipIfIReplied !== false && (mem.lastOut[it.senderNum] || 0) > it.ts) continue; // you already answered
-        if (F.voiceToText && it.type === 'audioMessage') { await this.voice(it, S); continue; }
-        if (F.autoReply && it.text && await this.autoReply(it, data, false)) continue;
-        if (isAwayActive(S, this.state.status, now)) { await this.away(it, S); continue; }
-        if (F.ai && it.text) aiQueue.set(it.chat, it); // one AI reply per chat, to the latest message
+        if (F.voiceToText && it.type === 'audioMessage' && inScope(featureScope(S, 'voice'), sc)) { await this.voice(it, S); continue; }
+        if (canReply && busy.active && await this.busyReply(it, S, busy, false)) continue;
+        if (F.autoReply && canReply && it.text && await this.autoReply(it, data, false)) continue;
+        if ((it.kind === 'message' || canReply) && isAwayActive(S, this.state.status, now) && inScope(featureScope(S, 'away'), sc)) { await this.away(it, S); continue; }
+        if (F.ai && canReply && it.aiText && inScope(featureScope(S, 'ai'), sc)) aiQueue.set(it.chat, it); // one AI reply per chat, to the latest message
       } catch (e) {
         log.warn(`Could not handle a message: ${e.message}`);
       }
@@ -159,15 +188,95 @@ export class Incoming {
     await this.send(it.chat, { text: head ? `${data.settings.header.text}\n${text}` : text }, { quoted: it.msg, kind });
   }
 
+  /** Did this group message @mention me or reply to one of my messages? */
+  talksToMe(it) {
+    const ci = it.content?.[it.type]?.contextInfo || it.content?.extendedTextMessage?.contextInfo || {};
+    if ((ci.mentionedJid || []).some((j) => this.wa.isMe(j))) return true;
+    return !!ci.participant && !!ci.quotedMessage && this.wa.isMe(ci.participant);
+  }
+
+  /** Put an emoji reaction on the incoming message. */
+  async react(it, emoji) {
+    if (!emoji) return;
+    await this.send(it.chat, { react: { text: emoji, key: it.msg.key } }, { kind: 'reply' });
+  }
+
   async autoReply(it, data, isGroup) {
     const mem = this.state.memory;
-    const rule = findRule(data.rules, it.text, { isGroup, contactId: it.contact?.id, tags: it.contact?.tags || [] }, mem.cooldowns, Date.now(), it.chat);
+    const ctx = { ...scopeCtx(it), isGroup };
+    const rule = findRule(data.rules, it.text, ctx, mem.cooldowns, Date.now(), it.chat);
     if (!rule) return false;
     mem.cooldowns[`${rule.id}|${it.chat}`] = Date.now();
+    if (rule.react) await this.react(it, String(rule.react).trim());
     const text = renderTemplate(pickReply(rule, it.id), { name: it.contact?.name || it.msg.pushName || '', first_name: firstName(it.contact?.name || it.msg.pushName || ''), my_name: data.settings.myName }, it.id);
-    await this.reply(it, text, 'reply');
-    log.info(`Auto-reply rule "${rule.id}" answered ${isGroup ? 'a group' : maskNumber(it.senderNum)}`);
+    if (text.trim()) await this.reply(it, text, 'reply');
+    log.info(`Auto-reply rule "${rule.id}" ${text.trim() ? 'answered' : 'reacted to'} ${isGroup ? 'a group' : maskNumber(it.senderNum)}`);
     return true;
+  }
+
+  /** A message to you (your own chat), with the alert header if that is switched on. */
+  async toOwner(text) {
+    const n = env.ownerNumber || this.wa.me();
+    if (!n) return;
+    const S = this.getData().settings;
+    const head = headerOn(S.header, 'alert');
+    await this.send(numberJid(n), { text: head ? `${S.header.text}\n${text}` : text }, { kind: 'alert' });
+  }
+
+  /** This busy session's bookkeeping (which chats already got the busy reply). Lives in status, no text. */
+  busyRun(busy) {
+    const st = this.state.status;
+    if (!st.busyRun || st.busyRun.id !== busy.id) st.busyRun = { id: busy.id, until: busy.until, source: busy.source, chats: [], n: 0, ended: false };
+    return st.busyRun;
+  }
+
+  /** Busy mode: reply ONCE per chat per busy session, only in the chats/groups picked for it. */
+  async busyReply(it, S, busy, isGroup) {
+    if (!inScope(featureScope(S, 'busy'), scopeCtx(it))) return false;
+    if (isGroup && S.busy?.groupsOnlyWhenTagged !== false && !this.talksToMe(it)) return false;
+    const run = this.busyRun(busy);
+    if (run.chats.includes(it.chat)) return false;
+    run.chats.push(it.chat); run.n += 1;
+    await this.reply(it, busyText(busy.message, busy.until, Date.now(), S.timezone), 'reply');
+    log.info(`Busy reply sent to ${isGroup ? 'a group' : maskNumber(it.senderNum)}`);
+    return true;
+  }
+
+  /** Called often by the runner: starts the busy session, and when the time is up turns it off and tells you. */
+  async busyTick() {
+    const S = this.getData().settings, st = this.state.status, now = Date.now();
+    const b = busyNow(S, st, now);
+    if (b.active) { this.busyRun(b); return; }
+    const run = st.busyRun;
+    if (!run || run.ended) return;
+    run.ended = true;
+    if (run.id !== b.id || run.quiet) return; // switched off by you (panel or !busy off) — nothing to report
+    const n = run.n || 0;
+    await this.toOwner(`🔕 Busy mode is off now, your time is up.\n${n ? `${n} chat${n > 1 ? 's' : ''} got your busy reply.` : 'Nobody needed the busy reply.'}`).catch((e) => log.warn(`busy notice: ${e.message}`));
+    log.info('Busy mode ended (time is up)');
+  }
+
+  /** "!busy 2h" / "!busy until 5pm" / "!busy off" from your own number. */
+  async busyCommand(it, S, arg) {
+    const st = this.state.status, now = Date.now(), tz = S.timezone;
+    const p = parseBusy(arg, now, tz);
+    if (p.error) return this.reply(it, `⚠️ ${p.error}`, 'alert');
+    if (p.off) {
+      const was = busyNow(S, st, now);
+      if (st.busyRun && !st.busyRun.ended) { st.busyRun.quiet = true; st.busyRun.ended = true; }
+      st.busy = { on: false, until: 0, at: now };
+      const n = was.active && st.busyRun?.id === was.id ? st.busyRun.n : 0;
+      return this.reply(it, was.active ? `☀️ Busy mode OFF.${n ? ` ${n} chat${n > 1 ? 's' : ''} got your busy reply.` : ''}` : '☀️ Busy mode was already off.', 'alert');
+    }
+    if (st.busyRun && !st.busyRun.ended) st.busyRun.quiet = true; // replaced by the new one, no "time is up" for the old
+    st.busy = { on: true, until: p.until, at: now };
+    const sc = featureScope(S, 'busy');
+    const people = sc.who === 'pick' ? (sc.contacts.length + sc.tags.length) : sc.who === 'nobody' ? 0 : -1;
+    const groups = Array.isArray(sc.groups) ? sc.groups.length : 0;
+    const where = people === 0 && !groups
+      ? '⚠️ No chats picked yet, so nobody gets the busy reply. Pick chats in the panel → Replies → Busy mode.'
+      : `Busy reply goes to ${people < 0 ? 'everyone allowed' : `${people} picked ${people === 1 ? 'person/list' : 'people/lists'}`}${groups ? ` + ${groups} group${groups > 1 ? 's' : ''}` : ''}, once per chat.`;
+    return this.reply(it, `🔕 Busy mode ON until ${busyTimeText(p.until, now, tz)}.\n${where}\nTurns off by itself. Send ${S.commands?.prefix || '!'}busy off to stop early.`, 'alert');
   }
 
   async away(it, S) {
@@ -182,19 +291,23 @@ export class Incoming {
   async ai(it, data) {
     const A = data.settings.ai || {};
     const mem = this.state.memory;
-    const c = it.contact;
-    if (A.who === 'contacts' && !c) return;
-    if (A.who === 'tags' && !(c?.tags || []).some((t) => (A.tags || []).includes(t))) return;
-    if (c && (A.exclude || []).includes(c.id)) return;
+    if (!inScope(featureScope(data.settings, 'ai'), scopeCtx(it))) return; // safety net: never outside the picked chats
     const day = localDate(Date.now(), data.settings.timezone);
     const ck = `${day}|${it.chat}`;
     mem.aiCount[ck] = (mem.aiCount[ck] || 0) + 1;
     if (mem.aiCount[ck] > (A.maxPerChatPerDay || 15)) return;
     const hist = mem.ai[it.chat] || [];
-    const answer = await aiReply(A, data.settings.myName, hist.slice(-(A.memory || 8)), it.text);
+    if (A.react) {
+      // Optional: let the AI pick one fitting reaction (or none). Any failure (no key, Groq down) is silent.
+      const ask = { ...A, examples: [], stylePrompt: `Pick ONE emoji reaction ${data.settings.myName} would put on this WhatsApp message. Allowed: ${REACTIONS.join(' ')}. Answer with only that emoji, or the word none if no reaction fits.` };
+      const emoji = pickReaction(await aiReply(ask, data.settings.myName, [], it.aiText || it.text).catch(() => ''));
+      await this.react(it, emoji).catch(() => {});
+    }
+    const said = it.aiText || it.text;
+    const answer = await aiReply(A, data.settings.myName, hist.slice(-(A.memory || 8)), said);
     if (!answer) return;
     await this.reply(it, answer, 'ai');
-    mem.ai[it.chat] = [...hist, { role: 'them', text: it.text }, { role: 'me', text: answer }].slice(-20);
+    mem.ai[it.chat] = [...hist, { role: 'them', text: said }, { role: 'me', text: answer }].slice(-20);
     log.info(`AI replied to ${maskNumber(it.senderNum)}`);
   }
 
@@ -251,18 +364,16 @@ export class Incoming {
       if (cmd === 'away') { this.state.status.away = { on: true, message: arg || S.away?.message, at: Date.now() }; return this.reply(it, `🌙 Away mode ON${arg ? `: "${arg}"` : ''} (for 12h or until ${prefix}back)`, 'alert'); }
       if (cmd === 'back') { this.state.status.away = { on: false, at: Date.now() }; return this.reply(it, '☀️ Away mode OFF', 'alert'); }
       if (cmd === 'pause') { this.state.status.pausedByOwner = true; return this.reply(it, '⏸️ Bot paused (scheduled sends stop). Send !resume to continue.', 'alert'); }
+      if (cmd === 'busy') return this.busyCommand(it, S, arg);
       if (cmd === 'resume') { this.state.status.pausedByOwner = false; return this.reply(it, '▶️ Bot resumed.', 'alert'); }
       if (cmd === 'status') {
         const lr = this.state.status.lastRun;
-        return this.reply(it, `✅ ${S.botName} is linked.\nLast run: ${lr ? new Date(lr.startedAt).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'first run'}\nAway: ${isAwayActive(S, this.state.status, Date.now()) ? 'on' : 'off'}`, 'alert');
+        return this.reply(it, `✅ ${S.botName} is linked.\nLast run: ${lr ? new Date(lr.startedAt).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'first run'}\nAway: ${isAwayActive(S, this.state.status, Date.now()) ? 'on' : 'off'}\nBusy: ${(() => { const b = busyNow(S, this.state.status, Date.now()); return b.active ? `on until ${busyTimeText(b.until, Date.now(), S.timezone)}` : 'off'; })()}`, 'alert');
       }
       if (cmd === 'text') { const q = this.quotedMsg(it); if (q?.message?.audioMessage) { const text = await transcribe(await this.download(q)); return this.reply(it, `🎤 ${text}`, 'alert'); } }
     }
     if (!F.commands) return;
-    const allow = S.commands?.allow || 'everyone';
-    if (!isOwner && allow === 'owner') return;
-    if (!isOwner && allow === 'contacts' && !it.contact) return;
-    if (it.isGroup && !isOwner && S.commands?.inGroups === false) return;
+    if (!isOwner && !inScope(featureScope(S, 'commands'), scopeCtx(it))) return; // only me + the people/groups picked in Settings
     switch (cmd) {
       case 'help': return en.help !== false && this.reply(it, helpText(S, isOwner && !it.isGroup));
       case 'weather': return en.weather && this.reply(it, await weather(arg));

@@ -85,7 +85,7 @@ export function helpText(s, isOwner) {
   if (en.tagall) lines.push(`${p}tagall <msg> — mention everyone (group admins)`);
   if (en.rules) lines.push(`${p}rules — group rules`);
   lines.push(`${p}help — this list`);
-  if (isOwner) lines.push('', '*Owner:*', `${p}away <msg> · ${p}back · ${p}status · ${p}pause · ${p}resume · ${p}text (reply to a voice note)`);
+  if (isOwner) lines.push('', '*Owner:*', `${p}away <msg> · ${p}back · ${p}status · ${p}pause · ${p}resume · ${p}text (reply to a voice note)`, `${p}busy 2h · ${p}busy until 5pm · ${p}busy off`);
   lines.push('', '— VR Bot by VR DEVELOPMENTS');
   return lines.join('\n');
 }

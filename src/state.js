@@ -7,6 +7,7 @@ import { AUTH_DIR, STATE_DIR, WORK, env } from './env.js';
 import { encryptJSON, decryptJSON, isEnvelope } from '../panel/shared/crypto.js';
 import { fetchBranch, readFile, commitFiles } from './gitstate.js';
 import { log } from './log.js';
+import { pruneWeekly } from '../panel/shared/report.js';
 
 export const STATE_FILES = ['status', 'sentlog', 'logs', 'memory'];
 
@@ -96,6 +97,8 @@ export function prune(st) {
   st.logs.entries = (st.logs.entries || []).slice(-500);
   st.status.runs = (st.status.runs || []).slice(-60);
   st.status.media = (st.status.media || []).slice(-300);
+  if (st.status.weekly) pruneWeekly(st.status.weekly, new Date().toISOString().slice(0, 10)); // counts only, last 15 days
+  if (st.status.busyRun?.chats) st.status.busyRun.chats = st.status.busyRun.chats.slice(-500);
   const m = st.memory;
   m.processed = (m.processed || []).slice(-3000);
   m.sentIds = (m.sentIds || []).slice(-500);

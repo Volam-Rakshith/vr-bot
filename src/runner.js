@@ -9,23 +9,30 @@ import { Incoming } from './incoming.js';
 import { MediaSaver } from './features/media.js';
 import { githubWatch, ntfyPoll, dispatchAlert } from './features/alerts.js';
 import { summaryText } from './features/summary.js';
+import { postStatus, weeklyReportText } from './features/autostatus.js';
+import { statusAudience } from '../panel/shared/status.js';
 import { buildJobs, expandTargets, recipientId } from '../panel/shared/planner.js';
 import { renderTemplate, firstName, headerOn } from '../panel/shared/templates.js';
 import { localDate, prettyDate, pretty12, localTime, WEEKDAYS, WEEKDAYS_FULL, weekdayOf } from '../panel/shared/time.js';
 import { maskNumber } from '../panel/shared/defaults.js';
+import { ghClient, shouldYield, handoffDue, writeChainInfo } from './chain.js';
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const MAX_TRIES = 3;
 
 export async function run({ inbox = [] } = {}) {
   const t0 = Date.now();
+  // "Always on": tell the last workflow step when this run started; it decides about the next run.
+  if (env.inActions) { try { writeChainInfo({ startedAt: t0, want: null }); } catch {} }
+  const chainEnd = (want, reason) => { if (env.inActions) { try { writeChainInfo({ want, reason, endedAt: Date.now() }); } catch {} } };
   if (!env.passphrase) { log.warn('VR_PASSPHRASE secret is not set yet — nothing to do. Add it in Settings → Secrets and variables → Actions (SETUP step 4).'); return 0; }
   log.group('Loading');
   let data = await loadData();
   const { state, hasSession } = await pullState();
   const S0 = data.settings;
   const T = S0.timing;
-  const rec = { startedAt: t0, trigger: env.eventName === 'workflow_dispatch' ? `manual:${env.action}` : env.eventName, sent: 0, failed: 0, received: 0, late: 0, notes: [] };
+  const via = process.env.VR_VIA || '';
+  const rec = { startedAt: t0, trigger: via === 'chain' ? 'always-on' : via === 'watchdog' ? 'watchdog' : env.eventName === 'workflow_dispatch' ? `manual:${env.action}` : env.eventName, sent: 0, failed: 0, received: 0, late: 0, notes: [] };
   log.info(`VR Bot run started (${rec.trigger}). Timezone ${S0.timezone}, look-ahead ${T.lookaheadMinutes} min.`);
   log.endGroup();
 
@@ -42,6 +49,7 @@ export async function run({ inbox = [] } = {}) {
   if (!hasSession && !env.fakeWA) {
     state.status.session = { status: 'never_paired' };
     log.warn('WhatsApp is not linked yet → open Actions → "VR Bot — Pair WhatsApp" → Run workflow.');
+    chainEnd(false, 'WhatsApp is not linked yet');
     return finish(0);
   }
 
@@ -76,13 +84,18 @@ export async function run({ inbox = [] } = {}) {
       const first = state.status.session?.status !== 'logged_out';
       state.status.session = { status: 'logged_out', at: Date.now() };
       log.error(e.message);
+      chainEnd(false, 'WhatsApp logged the bot out — pair again');
       return finish(first ? 1 : 0); // fail loudly once (GitHub emails you), then stay quiet until re-paired
     }
     state.status.session = { ...(state.status.session || {}), status: 'error', error: e.message, at: Date.now() };
     log.error(`Could not connect: ${e.message}`);
+    // Try a fresh run a couple of times (WhatsApp hiccup), then leave it to the watchdog.
+    state.status.connFails = (state.status.connFails || 0) + 1;
+    chainEnd(state.status.connFails <= 2, state.status.connFails <= 2 ? 'retry connecting' : 'could not connect 3 times in a row');
     return finish(1);
   }
   state.status.session = { status: 'ok', me: maskNumber(wa.me()), lastOk: Date.now(), pairedAt: state.status.session?.pairedAt };
+  state.status.connFails = 0;
   log.ok(`Connected as ${maskNumber(wa.me())}`);
   log.endGroup();
 
@@ -102,21 +115,46 @@ export async function run({ inbox = [] } = {}) {
   log.group('Reading new messages');
   await wa.waitPending(30000);
   rec.received += await incoming.drain();
+  await incoming.busyTick();
   log.info(`Handled ${rec.received} new message(s)`);
   log.endGroup();
 
-  // ---- alerts to you ----
+  // ---- alerts to you ---- (checked at the start, and every 10 min while an always-on run stays connected)
   const S = data.settings;
-  if (S.features.alerts) {
-    const alerts = [...dispatchAlert()];
-    if (S.alerts.github?.enabled) { try { alerts.push(...await githubWatch(S.alerts.github, state.memory.github, Date.now())); } catch (e) { log.warn(`GitHub watcher: ${e.message}`); } }
-    if (S.alerts.form?.enabled && S.alerts.form.ntfyTopic) { try { alerts.push(...await ntfyPoll(S.alerts.form.ntfyTopic, state.memory.ntfy)); } catch (e) { log.warn(`Website form check: ${e.message}`); } }
+  const checkAlerts = async (first) => {
+    const Sx = getData().settings;
+    if (!Sx.features.alerts) return;
+    const alerts = first ? [...dispatchAlert()] : [];
+    if (Sx.alerts.github?.enabled) { try { alerts.push(...await githubWatch(Sx.alerts.github, state.memory.github, Date.now())); } catch (e) { log.warn(`GitHub watcher: ${e.message}`); } }
+    if (Sx.alerts.form?.enabled && Sx.alerts.form.ntfyTopic) { try { alerts.push(...await ntfyPoll(Sx.alerts.form.ntfyTopic, state.memory.ntfy)); } catch (e) { log.warn(`Website form check: ${e.message}`); } }
     for (const a of alerts) { try { await toOwner(a); rec.sent++; } catch (e) { log.warn(`alert failed: ${e.message}`); } }
     if (alerts.length) log.info(`Sent ${alerts.length} alert(s) to you`);
+  };
+  await checkAlerts(true);
+  let lastAlerts = Date.now();
+
+  // ---- panel buttons: "Post test status now" / "Send me this week's report now" ----
+  if (env.action === 'test-send' && (env.target === '@status' || env.target === '@report' || env.target.startsWith('@special:'))) {
+    try {
+      if (env.target === '@status' || env.target.startsWith('@special:')) {
+        const owner = env.ownerNumber || wa.me();
+        const specialId = env.target.startsWith('@special:') ? env.target.slice(9) : '';
+        const r = await postStatus({ send, data, state, ownerNumber: owner, botNumber: wa.me(), test: true, specialId });
+        rec.sent++;
+        log.ok(`Test status posted (${r.label}) — only you can see it. Open WhatsApp → Updates → My status`);
+        const real = statusAudience(data.settings.autoStatus, { contacts: data.contacts, recent: state.memory.lastIn, owner: [owner, wa.me()] });
+        const others = real.numbers.length - real.self;
+        await toOwner(`🧪 Test status posted (${r.label}). Only you can see it: WhatsApp → Updates → My status (delete it there if you like).\nThe real one will go to ${others} ${others === 1 ? 'person' : 'people'} + you${real.capped ? ` (capped at ${real.numbers.length}; ${real.total - real.self} picked)` : ''}.`).catch(() => {});
+      } else {
+        await toOwner(weeklyReportText(data, state));
+        rec.sent++;
+        log.ok('Weekly report sent to you');
+      }
+    } catch (e) { rec.failed++; log.warn(`Test failed: ${e.message}`); await toOwner(`❌ Test failed: ${e.message}`).catch(() => {}); }
   }
 
   // ---- manual test / send-now from the panel ----
-  if (env.action === 'test-send' || env.action === 'send-now') {
+  if ((env.action === 'test-send' || env.action === 'send-now') && !env.target.startsWith('@')) {
     const sch = data.schedules.find((x) => x.id === env.target);
     if (!sch) log.warn(`Schedule "${env.target}" not found`);
     else {
@@ -178,19 +216,31 @@ export async function run({ inbox = [] } = {}) {
         }
         bc.n++;
       }
-      let jid;
-      if (job.to.type === 'group') jid = job.to.jid;
-      else {
-        const ex = await wa.exists(job.to.number);
-        if (!ex.exists) throw Object.assign(new Error('number is not on WhatsApp'), { permanent: true });
-        jid = ex.jid || numberJid(job.to.number);
+      let extra = '';
+      if (job.to.type === 'status') {
+        // Auto status: posted to your WhatsApp status, seen by the people picked in the panel
+        const r = await postStatus({ send, data: d, state, ownerNumber: env.ownerNumber || wa.me(), botNumber: wa.me(), date: job.date, onlySpecial: job.dynamic === 'status-special' });
+        if (r.skipped) {
+          ledger[job.key] = { t: Date.now(), s: 'skipped', k: job.kind, label: job.label, to: 'My status', err: r.skipped };
+          log.info(`Auto status skipped: ${r.skipped}`);
+          return;
+        }
+        extra = ` (${r.label}, ${r.count} people${r.capped ? ', capped' : ''})`;
+      } else {
+        let jid;
+        if (job.to.type === 'group') jid = job.to.jid;
+        else {
+          const ex = await wa.exists(job.to.number);
+          if (!ex.exists) throw Object.assign(new Error('number is not on WhatsApp'), { permanent: true });
+          jid = ex.jid || numberJid(job.to.number);
+        }
+        let text = job.dynamic === 'summary' ? summaryText(d, state, Date.now()) : job.dynamic === 'weekly' ? weeklyReportText(d, state, Date.now()) : job.text;
+        if (!text) throw Object.assign(new Error('message is empty'), { permanent: true });
+        if (job.header) text = `${Sx.header.text}\n${text}`;
+        await send(jid, { text }, { kind: job.kind });
       }
-      let text = job.dynamic === 'summary' ? summaryText(d, state, Date.now()) : job.text;
-      if (!text) throw Object.assign(new Error('message is empty'), { permanent: true });
-      if (job.header) text = `${Sx.header.text}\n${text}`;
-      await send(jid, { text }, { kind: job.kind });
       const late = Date.now() - job.at;
-      ledger[job.key] = { t: Date.now(), s: 'sent', k: job.kind, label: job.label, to: job.to.type === 'group' ? job.to.name : (job.to.name || who(job.to)), at: job.at, lateSec: Math.round(late / 1000) };
+      ledger[job.key] = { t: Date.now(), s: 'sent', k: job.kind, label: job.label + extra, to: job.to.type === 'group' ? job.to.name : (job.to.name || who(job.to)), at: job.at, lateSec: Math.round(late / 1000) };
       if (job.kind === 'followup') state.memory.followed[job.to.number] = Number(job.sourceId.split('-').pop());
       rec.sent++;
       if (late > 120000) rec.late++;
@@ -207,11 +257,17 @@ export async function run({ inbox = [] } = {}) {
     }
   };
 
+  // "Always on": stay connected until it is time to hand over to the next run (see src/chain.js).
+  const alwaysOn = () => { const Sx = getData().settings; return env.inActions && !!env.githubToken && Sx.timing.relay !== false && !Sx.paused && !state.status.pausedByOwner; };
+  const gh = env.inActions && env.githubToken ? ghClient({ repo: env.repo, token: env.githubToken }) : null;
+  let lastYieldCheck = Date.now(), downSince = 0, endWant = null, endReason = '';
+  if (alwaysOn()) log.info('Always on: this run stays connected and hands over to the next run before it ends');
+
   let jobs = plan();
   log.info(`${jobs.length} message(s) due in this window`);
   while (true) {
     const now = Date.now();
-    if (now > deadline) { log.warn('Reached max run time, stopping (the next run continues)'); break; }
+    if (now > deadline) { log.info('Reached max run time — handing over to the next run'); endWant = true; endReason = 'hand-over'; break; }
     if (now - lastRefresh > 4 * 60000) { // pick up panel edits made while we wait
       try { data_ = await loadData({ fresh: true }); } catch (e) { log.warn(`Could not refresh data: ${e.message}`); }
       lastRefresh = now;
@@ -223,38 +279,42 @@ export async function run({ inbox = [] } = {}) {
       await sendJob(j);
     }
     rec.received += await incoming.drain();
+    await incoming.busyTick();
     if (now - lastCheckpoint > 10 * 60000) { state.logs.entries.push(...log.drain()); persistLocal(state); await pushState('checkpoint').catch((e) => log.warn(`checkpoint: ${e.message}`)); lastCheckpoint = Date.now(); }
     const next = plan().find((j) => j.at > Date.now() + 1000);
     const onlineLongEnough = Date.now() - t0 >= T.minOnlineSeconds * 1000;
-    if (!next && onlineLongEnough && !due.length) break;
-    const wait = next ? Math.min(next.at - Date.now(), 20000) : 3000;
+    if (alwaysOn()) {
+      // WhatsApp connection lost for 3+ minutes → end; a fresh run reconnects cleanly.
+      if (wa.loggedOut) { endWant = false; endReason = 'WhatsApp logged the bot out — pair again'; break; }
+      if (!wa.open) { downSince = downSince || Date.now(); if (Date.now() - downSince > 3 * 60000) { log.warn('WhatsApp connection lost — handing over to a fresh run'); endWant = true; endReason = 'reconnect'; break; } } else downSince = 0;
+      if (handoffDue({ now: Date.now(), t0, maxRunMs: T.maxRunMinutes * 60000, nextJobAt: next?.at })) { log.info('Handing over to the next run'); endWant = true; endReason = 'hand-over'; break; }
+      if (Date.now() - lastAlerts > 10 * 60000) { lastAlerts = Date.now(); await checkAlerts(false); }
+      // Someone pressed Run now / Test / Pair (or an alert arrived): let that run take over.
+      if (gh && Date.now() - lastYieldCheck > 60000) {
+        lastYieldCheck = Date.now();
+        try {
+          if (shouldYield({ runs: await gh.liveRuns(), selfId: process.env.GITHUB_RUN_ID, now: Date.now(), nextJobAt: next?.at })) { log.info('Another run is waiting (Run now / Test / Pair) — letting it take over'); endWant = true; endReason = 'yield'; break; }
+        } catch (e) { /* API hiccup: just keep running */ }
+      }
+    } else if (!next && onlineLongEnough && !due.length) { endWant = false; endReason = getData().settings.paused || state.status.pausedByOwner ? 'paused' : 'always-on is switched off'; break; }
+    const wait = next ? Math.min(next.at - Date.now(), 20000) : (alwaysOn() ? 5000 : 3000);
     if (next && wait > 60000) log.info(`Waiting ${Math.round((next.at - Date.now()) / 60000)} min for the next send`);
     await sleep(Math.max(200, wait));
   }
   log.endGroup();
 
-  // ---- relay: make sure a run is alive for the next send, even if GitHub's cron starts late ----
-  if (T.relay && env.inActions && env.githubToken) {
-    const now = Date.now();
-    const upcoming = buildJobs({ ...getData(), groups: state.status.groups, memory: state.memory, ownerNumber: env.ownerNumber || wa.me() }, now, now + 3 * 3600000).filter((j) => !ledger[j.key]);
-    const nextJob = upcoming[0];
-    const relayMax = (T.maxRunMinutes - 10) * 60000;
-    if (nextJob && nextJob.at - now < relayMax) {
-      const mins = Math.ceil((nextJob.at - now) / 60000) + 3;
-      try {
-        const r = await fetch(`https://api.github.com/repos/${env.repo}/actions/workflows/bot.yml/dispatches`, {
-          method: 'POST', headers: { Authorization: `Bearer ${env.githubToken}`, Accept: 'application/vnd.github+json', 'User-Agent': 'vr-bot' },
-          body: JSON.stringify({ ref: env.dataBranch, inputs: { action: 'run', lookahead: String(mins) } }),
-        });
-        if (r.ok) log.info(`Next send in ${mins - 3} min → started a relay run to wait for it`); else log.warn(`Relay dispatch failed (${r.status})`);
-      } catch (e) { log.warn(`Relay dispatch failed: ${e.message}`); }
-    }
+  // ---- always on: the workflow's last step reads this and starts the next run ----
+  {
+    const on = alwaysOn();
+    const want = endReason === 'yield' || (endWant !== false && on);
+    const why = want ? (endReason || 'hand-over') : endWant === false ? endReason : (getData().settings.paused || state.status.pausedByOwner ? 'paused' : 'always-on is switched off');
+    chainEnd(want, why);
   }
 
   // ---- heartbeat so GitHub doesn't disable the schedule after 60 days without commits ----
   if (env.inActions && env.githubToken && Date.now() - (state.status.heartbeatAt || 0) > 20 * 86400000) {
     try {
-      const url = `https://api.github.com/repos/${env.repo}/contents/data/.heartbeat`;
+      const url = `${process.env.VR_GH_API || 'https://api.github.com'}/repos/${env.repo}/contents/data/.heartbeat`;
       const h = { Authorization: `Bearer ${env.githubToken}`, Accept: 'application/vnd.github+json', 'User-Agent': 'vr-bot' };
       const cur = await fetch(`${url}?ref=${env.dataBranch}`, { headers: h });
       const sha = cur.ok ? (await cur.json()).sha : undefined;

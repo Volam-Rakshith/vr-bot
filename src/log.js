@@ -28,4 +28,4 @@ export const log = {
   drain() { return entries.splice(0, entries.length); },
 };
 export { maskNumber };
-export const who = (r) => (r?.type === 'group' ? 'a group' : maskNumber(r?.number || r));
+export const who = (r) => (r?.type === 'group' ? 'a group' : r?.type === 'status' ? 'your status' : maskNumber(r?.number || r));

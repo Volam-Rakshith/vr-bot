@@ -3,7 +3,9 @@ const now = Date.now();
 const m = 60000, h = 3600000, d = 86400000;
 export const DEMO = {
   files: {
-    settings: { myName: 'Rakshith', timezone: 'Asia/Kolkata', features: { ai: true, away: true, followup: true } },
+    settings: { version: 2, myName: 'Rakshith', timezone: 'Asia/Kolkata', features: { ai: true, away: true, followup: true },
+      busy: { who: 'pick', contacts: ['c3'], tags: ['friends'], groups: ['120363000000000001@g.us'] },
+      autoStatus: { enabled: true, time: '07:30', days: [0, 1, 2, 3, 4, 5, 6], mode: 'quote', audience: 'except', tags: ['clients'] } },
     contacts: { contacts: [
       { id: 'c1', name: 'Amma', number: '+91 98480 00001', birthday: '1980-03-12', tags: ['family'], header: 'off' },
       { id: 'c2', name: 'Nanna', number: '+91 98480 00002', birthday: '1976-07-21', tags: ['family'] },

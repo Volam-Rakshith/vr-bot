@@ -5,6 +5,7 @@ import { occurrencesBetween, jitterMs, seededRandom } from './scheduler.js';
 import { renderTemplate, firstName, headerOn } from './templates.js';
 import { mergedFestivals, festivalDate } from './festivals.js';
 import { normalizeNumber } from './defaults.js';
+import { specialFor, specialConfig, specialDatesBetween } from './specialdays.js';
 import { zonedToUtc, localDate, addDays, prettyDate, WEEKDAYS, WEEKDAYS_FULL, weekdayOf, pretty12, parseDate } from './time.js';
 
 const MAX_JITTER_MIN = 60;
@@ -34,7 +35,7 @@ export function expandTargets(targets, { contacts = [], groups = [], ownerNumber
   return out;
 }
 
-export function recipientId(r) { return r.type === 'group' ? r.jid : r.number; }
+export function recipientId(r) { return r.type === 'group' || r.type === 'status' ? r.jid : r.number; }
 
 function vars(base, r, date, time) {
   const name = r.type === 'group' ? r.name : (r.name || '');
@@ -171,6 +172,43 @@ export function buildJobs(data, fromMs, toMs) {
     const me = { type: 'number', number: normalizeNumber(data.ownerNumber), name: 'me', owner: true };
     for (const occ of occurrencesBetween(pseudo, wideFrom, wideTo, tz)) {
       addOccurrence({ kind: 'summary', sourceId: 'daily-summary', label: 'Daily summary', occ, recipients: [me], text: '', delayMin: 0, dynamic: 'summary' });
+    }
+  }
+
+  // 6) Weekly report to you (Sunday 8 PM by default; text is written at send time, counts only)
+  const wk = s.weekly || {};
+  if (wk.enabled !== false && data.ownerNumber) {
+    const pseudo = { id: 'weekly-report', enabled: true, time: wk.time || '20:00', repeat: { type: 'weekly', days: [Number(wk.day ?? 0)] } };
+    const me = { type: 'number', number: normalizeNumber(data.ownerNumber), name: 'me', owner: true };
+    for (const occ of occurrencesBetween(pseudo, wideFrom, wideTo, tz)) {
+      addOccurrence({ kind: 'summary', sourceId: 'weekly-report', label: 'Weekly report', occ, recipients: [me], text: '', delayMin: 0, dynamic: 'weekly' });
+    }
+  }
+
+  // 7) Auto status (your WhatsApp status; what it says is picked at send time)
+  const st = s.autoStatus || {};
+  if (st.enabled) {
+    const days = (Array.isArray(st.days) ? st.days : []).map(Number).filter((d) => d >= 0 && d <= 6);
+    if (days.length) {
+      const pseudo = { id: 'auto-status', enabled: true, time: st.time || '08:00', repeat: days.length === 7 ? { type: 'daily' } : { type: 'weekly', days } };
+      const r = { type: 'status', jid: 'status@broadcast', name: 'My status' };
+      for (const occ of occurrencesBetween(pseudo, wideFrom, wideTo, tz)) {
+        const sp = specialFor(occ.date, st);
+        addOccurrence({ kind: 'status', sourceId: 'auto-status', label: sp ? `Special day · ${sp.name}` : 'Auto status', occ, recipients: [r], text: '', delayMin: 0, dynamic: 'status' });
+      }
+    }
+    // Special days that are NOT one of your chosen days still get their card ("Post special days even on my off days").
+    // Same key format as above → still only one status per day.
+    if (specialConfig(st).enabled && specialConfig(st).offDays && days.length && days.length < 7) {
+      const r = { type: 'status', jid: 'status@broadcast', name: 'My status' };
+      for (const date of specialDatesBetween(localDate(wideFrom, tz), localDate(wideTo, tz), st)) {
+        if (days.includes(weekdayOf(date))) continue; // already covered by the normal schedule
+        const sp = specialFor(date, st);
+        const pseudo = { id: `auto-status-${date}`, enabled: true, time: st.time || '08:00', repeat: { type: 'once', date } };
+        for (const occ of occurrencesBetween(pseudo, wideFrom, wideTo, tz)) {
+          addOccurrence({ kind: 'status', sourceId: 'auto-status', label: `Special day · ${sp.name}`, occ, recipients: [r], text: '', delayMin: 0, dynamic: 'status-special' });
+        }
+      }
     }
   }
 

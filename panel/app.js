@@ -7,8 +7,12 @@ import { describe, nextOccurrence } from './shared/scheduler.js';
 import { buildJobs, expandTargets } from './shared/planner.js';
 import { renderTemplate, headerOn, KNOWN_PLACEHOLDERS } from './shared/templates.js';
 import { mergedFestivals, upcomingFestivals, festivalDate } from './shared/festivals.js';
-import { localDate, localTime, prettyDate, pretty12, WEEKDAYS, WEEKDAYS_FULL, MONTHS, isValidTime, isValidDate } from './shared/time.js';
-import { matchText, ruleApplies } from './shared/rules.js';
+import { localDate, localTime, prettyDate, pretty12, WEEKDAYS, WEEKDAYS_FULL, MONTHS, isValidTime, isValidDate, zonedToUtc } from './shared/time.js';
+import { matchText, ruleApplies, REACTIONS } from './shared/rules.js';
+import { QUOTES, formatQuote } from './shared/quotes.js';
+import { statusAudience, STATUS_COLORS, STATUS_FONTS } from './shared/status.js';
+import { busyNow, busyText, busyTimeText } from './shared/busy.js';
+import { SPECIAL_DAYS, SPECIAL_BY_ID, upcomingSpecials, specialConfig, specialFor, cardUrl } from './shared/specialdays.js';
 
 const FILES = ['settings', 'contacts', 'schedules', 'templates', 'festivals', 'rules', 'groups'];
 const $ = (s, el = document) => el.querySelector(s);
@@ -86,6 +90,14 @@ const api = {
 
 /* ---------------- data access ---------------- */
 const settings = () => withDefaults(S.files.settings?.data);
+/** "Always on" (Settings → Timing): one run stays connected, so replies are near-instant. */
+const alwaysOn = () => { const s = settings(); return s.timing.relay !== false && !s.paused; };
+/** After un-pausing or switching Always on back on, start a run right away (don't wait for GitHub's timer). */
+async function kickIfResumed(before, after) {
+  const off = (x) => !!x.paused || x.timing?.relay === false;
+  if (S.demo || !off(withDefaults(before)) || off(withDefaults(after))) return;
+  try { await api.dispatch({ action: 'run' }); toast('Resumed ✓ — the bot starts in about a minute', 'ok'); } catch { toast('Saved, but could not start the bot — tap ▶ Run now', 'bad'); }
+}
 const contacts = () => S.files.contacts?.data?.contacts || [];
 const schedules = () => S.files.schedules?.data?.schedules || [];
 const templates = () => S.files.templates?.data?.templates || [];
@@ -145,13 +157,13 @@ function whenText(at) {
 }
 const toggle = (attrs, checked, label = 'Toggle') => `<span class="tg"><input type="checkbox" role="switch" aria-label="${esc(label)}" ${attrs} ${checked ? 'checked' : ''}><span></span></span>`;
 const sw = (title, desc, attrs, checked, pill = '') => `<div class="switch"><div class="txt"><b>${esc(title)} ${pill}</b>${desc ? `<span>${desc}</span>` : ''}</div>${toggle(attrs, checked, title)}</div>`;
-const delayedPill = '<span class="pill warn tiny" title="GitHub checks every ~30 min">⏱ delayed</span>';
+const delayedPill = () => (alwaysOn() ? '' : '<span class="pill warn tiny" title="GitHub checks every ~30 min">⏱ delayed</span>');
 const seg = (field, options, value) => `<div class="seg" role="group">${options.map(([v, l]) => `<button type="button" data-seg="${field}" data-v="${esc(v)}" aria-pressed="${String(v) === String(value)}">${esc(l)}</button>`).join('')}</div>`;
 const getPath = (o, p) => p.split('.').reduce((a, k) => (a == null ? a : a[k]), o);
 function setPath(o, p, v) { const ks = p.split('.'); let c = o; ks.slice(0, -1).forEach((k) => { if (c[k] == null || typeof c[k] !== 'object') c[k] = {}; c = c[k]; }); c[ks.at(-1)] = v; }
 function readInput(el) {
   const t = el.dataset.type;
-  if (el.type === 'checkbox') return el.checked;
+  if (el.type === 'checkbox') return t === 'neg' ? !el.checked : el.checked; // neg: switch ON = setting false
   if (t === 'num') return el.value === '' ? null : Number(el.value);
   if (t === 'csv') return el.value.split(',').map((x) => x.trim()).filter(Boolean);
   if (t === 'lines') return el.value.split('\n').map((x) => x.trim()).filter(Boolean);
@@ -196,6 +208,171 @@ function messagePreview(text, kind, override, contactOverride, vars = {}) {
 }
 const placeholderChips = (target) => `<div class="chips" style="margin-top:6px">${KNOWN_PLACEHOLDERS.map((p) => `<button type="button" class="chip" data-act="ins" data-target="${target}" data-v="{${p}}">{${p}}</button>`).join('')}<button type="button" class="chip" data-act="ins" data-target="${target}" data-v="{{Hi|Hello|Hey}}">{{Hi|Hello}}</button></div>`;
 
+/* ---- "who / which chats" pickers: one look for rules, AI, commands, away, voice and media ---- */
+const chipList = (path, items, sel) => `<div class="chips" style="margin-top:8px">${items.map(([v, l]) => `<button type="button" class="chip ${sel.includes(v) ? 'on' : ''}" data-act="pick" data-path="${esc(path)}" data-v="${esc(v)}" aria-pressed="${sel.includes(v)}">${esc(l)}</button>`).join('')}</div>`;
+/** Contacts + tags to tap. base = the object path holding .contacts and .tags ('' for the rule being edited). */
+function peopleChips(base) {
+  const o = base ? getPath(D, base) || {} : D;
+  const p = (k) => (base ? `${base}.${k}` : k);
+  const cs = contacts().map((c) => [c.id, `👤 ${c.name}`]), ts = allTags().map((t) => [t, `🏷️ ${t}`]);
+  const n = (o.contacts || []).length + (o.tags || []).length;
+  if (!cs.length && !ts.length) return '<p class="hint">Add people in Contacts first, then pick them here.</p>';
+  return `${cs.length ? chipList(p('contacts'), cs, o.contacts || []) : ''}${ts.length ? chipList(p('tags'), ts, o.tags || []) : ''}
+    <p class="hint">${n ? `${n} picked. Tap again to remove.` : '⚠️ Nobody picked yet, so it won’t act for anyone. Tap names or lists above.'}</p>`;
+}
+/** Group selector. value: "all" | "none" | [group ids]. */
+function groupScope(path, value, opts, hints = {}) {
+  const mode = Array.isArray(value) ? 'pick' : (value || 'all');
+  const sel = Array.isArray(value) ? value : [];
+  const known = seenGroups().map((g) => [g.id, `👥 ${g.name}`]);
+  const extra = sel.filter((id) => !known.some(([k]) => k === id)).map((id) => [id, `👥 ${groupsCfg()[id]?.name || 'group (left?)'}`]);
+  const btns = `<div class="seg" role="group">${opts.map(([v, l]) => `<button type="button" data-act="gscope" data-path="${esc(path)}" data-v="${v}" aria-pressed="${v === mode}">${esc(l)}</button>`).join('')}</div>`;
+  let body = '';
+  if (mode === 'pick') {
+    body = known.length || extra.length ? chipList(path, [...known, ...extra], sel) : '';
+    body += `<p class="hint">${!known.length ? 'Your WhatsApp groups appear here after the bot\'s first run. ' : ''}${sel.length ? `${sel.length} group${sel.length > 1 ? 's' : ''} picked.` : '⚠️ No group picked yet, so it stays quiet in every group.'}${hints.pick ? ' ' + hints.pick : ''}</p>`;
+  } else if (hints[mode]) body = `<p class="hint">${hints[mode]}</p>`;
+  return btns + body;
+}
+const whoMode = (v) => (v === 'tags' ? 'pick' : v); // old "Some tags" = "Only these…" with only tags picked
+const wdPick = (field, sel) => `<div class="chips">${WEEKDAYS.map((w, i) => `<button type="button" class="chip ${(sel || []).includes(i) ? 'on' : ''}" data-act="wd" data-field="${field}" data-i="${i}" aria-pressed="${(sel || []).includes(i)}">${w}</button>`).join('')}</div>`;
+
+/* ---- 🔕 Busy mode card (Replies screen). Saves right away when switched on/off. ---- */
+let busyDur = '60';
+function busyCard(s) {
+  const b = busyNow(s, status(), Date.now());
+  const bs = s.busy || {};
+  const picked = (bs.who === 'pick' ? (bs.contacts || []).length + (bs.tags || []).length : 0) + (Array.isArray(bs.groups) ? bs.groups.length : 0);
+  const head = b.active
+    ? `<div class="banner ok"><span>🔕</span><div><b>Busy until ${esc(busyTimeText(b.until, Date.now(), tz()))}</b>${b.source === 'whatsapp' ? 'Switched on from WhatsApp (!busy). ' : ''}Turns off by itself and tells you on WhatsApp.</div></div>`
+    : '';
+  const durs = [['30', '30 min'], ['60', '1 hour'], ['120', '2 hours'], ['180', '3 hours'], ['until', 'Until…']];
+  return `<div class="card" id="busyCard"><h2>🔕 Busy mode ${b.active ? '<span class="pill ok tiny">ON</span>' : ''}</h2>
+    ${head}
+    <p class="muted small" style="margin-top:0">While you're busy, the bot replies <b>once</b> per chat with your busy message, only in the chats and groups you pick below. Stickers and GIFs don't trigger it.</p>
+    ${picked ? '' : '<div class="banner warn"><span>👇</span><div><b>Pick chats first</b>Nobody is picked yet, so busy mode won’t reply to anyone. Choose people or groups below, then Save replies.</div></div>'}
+    ${b.active ? `<div class="btns"><button class="btn" data-act="busy-off">☀️ I'm free — turn off</button></div>` : `
+    <div class="field"><span class="lbl">For how long</span><div class="seg" role="group">${durs.map(([v, l]) => `<button type="button" data-act="busy-dur" data-v="${v}" aria-pressed="${busyDur === v}">${l}</button>`).join('')}</div>
+      ${busyDur === 'until' ? `<input id="busyUntil" type="time" aria-label="Busy until" style="margin-top:8px" value="${esc(localTime(Date.now() + 2 * 3600000, tz()).slice(0, 3) + '00')}">` : ''}</div>
+    <div class="btns"><button class="btn primary" data-act="busy-on">🔕 Turn on busy mode</button></div>`}
+    <div class="field" style="margin-top:12px"><label for="fBm">Busy message</label><textarea id="fBm" data-f="busy.message">${esc(bs.message)}</textarea>
+      <p class="hint">{time} becomes the time you're back, e.g. “${esc(busyText(bs.message, Date.now() + 2 * 3600000, Date.now(), tz()))}”</p></div>
+    <div class="field"><span class="lbl">Private chats that get it</span>${seg('busy.who', [['nobody', 'Nobody'], ['pick', 'Only these…']], bs.who === 'pick' ? 'pick' : 'nobody')}${bs.who === 'pick' ? peopleChips('busy') : ''}</div>
+    <div class="field"><span class="lbl">Groups that get it</span>${groupScope('busy.groups', bs.groups, [['none', 'No groups'], ['pick', 'Only these groups']], { none: 'Never in groups.' })}</div>
+    ${Array.isArray(bs.groups) ? sw('In groups, only when someone tags me', 'Replies only when someone @mentions you or replies to your message (recommended)', 'data-f="busy.groupsOnlyWhenTagged"', bs.groupsOnlyWhenTagged !== false) : ''}
+    <p class="hint">From WhatsApp (message yourself): <span class="mono">!busy 2h</span> · <span class="mono">!busy 30m</span> · <span class="mono">!busy until 5pm</span> · <span class="mono">!busy off</span></p>
+  </div>`;
+}
+
+/* ---- 📸 Auto status screen ---- */
+const FONT_CSS = { 0: 'font-family:system-ui,sans-serif', 6: 'font-family:system-ui,sans-serif;font-weight:800', 2: 'font-family:"Brush Script MT",cursive;font-style:italic', 7: 'font-family:"Comic Sans MS","Trebuchet MS",sans-serif', 8: 'font-family:Georgia,serif;font-weight:700', 9: 'font-family:Verdana,sans-serif;font-weight:800', 10: 'font-family:"Courier New",monospace;font-weight:700' };
+function statusPreview(a) {
+  const color = /^#[0-9a-f]{6}$/i.test(a.color || '') ? a.color : STATUS_COLORS[new Date().getDate() % STATUS_COLORS.length];
+  const font = STATUS_FONTS.some(([v]) => String(v) === String(a.font)) ? Number(a.font) : STATUS_FONTS[new Date().getDate() % STATUS_FONTS.length][0];
+  let text;
+  if (a.mode === 'own') text = (a.texts || []).find((x) => x.trim()) || 'Write your first status below ✍️';
+  else if (a.mode === 'photo') return `<div class="st-prev photo"><div><b>🖼️ Photo status</b><span>${esc(a.photoUrl || 'Paste a photo link below')}</span>${a.photoCaption ? `<em>${esc(a.photoCaption)}</em>` : ''}</div></div>`;
+  else text = formatQuote(QUOTES[(new Date().getDate() * 7) % QUOTES.length]);
+  return `<div class="st-prev" style="background:${color}"><p style="${FONT_CSS[font] || ''}">${esc(text).replace(/\n/g, '<br>')}</p><small>${a.mode === 'own' ? 'Your text' : a.aiFresh ? 'Example · AI writes a fresh line each time' : 'Example · a different quote every time'}</small></div>`;
+}
+/* ---- 🎉 Special days (part of the Auto status screen) ---- */
+let sdAll = false; // "Show all days this year" (screen state only, not saved)
+function daysAway(date, today) {
+  const n = Math.round((Date.UTC(+date.slice(0, 4), +date.slice(5, 7) - 1, +date.slice(8, 10)) - Date.UTC(+today.slice(0, 4), +today.slice(5, 7) - 1, +today.slice(8, 10))) / 86400000);
+  return n === 0 ? 'Today' : n === 1 ? 'Tomorrow' : `in ${n} days`;
+}
+function specialCard(a) {
+  const sp = specialConfig(a);
+  const today = localDate(Date.now(), tz());
+  const rows = upcomingSpecials(today, sdAll ? 366 : 60, a);
+  const days = (a.days || []).map(Number);
+  const offNote = days.length === 7 ? '' : sp.offDays ? 'Special days on your off days still get their card.' : 'Special days on your off days are skipped.';
+  const todaySp = a.enabled && sp.enabled ? specialFor(today, a) : null;
+  const row = (r) => {
+    const own = a.special?.items?.[r.id]?.caption || '';
+    return `<div class="sd-row${r.on ? '' : ' off'}">
+      <div class="sd-top">
+        <button type="button" class="sd-thumb" data-act="sd-prev" data-v="${esc(r.id)}" aria-label="Preview ${esc(r.name)}"><img src="${esc(cardUrl(r.id))}" alt="" width="45" height="80" loading="lazy"></button>
+        <div class="main"><div class="t">${esc(r.name)}</div>
+          <div class="d">${esc(prettyDate(r.date))} · ${esc(daysAway(r.date, today))}${r.approx ? ' <span class="pill warn tiny" title="Depends on the moon">±1 day</span>' : ''}</div>
+          ${r.clash && r.on ? `<div class="d warn">Same day as ${esc(r.clash)}, which is posted instead (one status a day)</div>` : ''}</div>
+        ${toggle(`data-f="autoStatus.special.items.${esc(r.id)}.off" data-type="neg" data-rr="1"`, r.on, `Post ${r.name}`)}
+      </div>
+      <details class="sd-more"><summary>Caption &amp; test</summary>
+        <div class="field"><label for="sdc-${esc(r.id)}">Caption under the picture</label><input id="sdc-${esc(r.id)}" type="text" maxlength="300" data-f="autoStatus.special.items.${esc(r.id)}.caption" value="${esc(own)}" placeholder="${esc(SPECIAL_BY_ID[r.id].caption)}"><p class="hint">Leave empty to use the one shown in grey.</p></div>
+        <div class="btns"><button type="button" class="btn sm" data-act="sd-prev" data-v="${esc(r.id)}">Preview</button><button type="button" class="btn sm cy" data-act="sd-test" data-v="${esc(r.id)}">Post test now</button></div>
+      </details>
+    </div>`;
+  };
+  return `<div class="card"><h2>🎉 Special days</h2>
+    ${sw('Special days', 'On festivals and days like Diwali, Sankranti or World Savings Day, post a picture card instead of the quote', 'data-f="autoStatus.special.enabled" data-rr="1"', sp.enabled)}
+    ${a.enabled ? '' : '<p class="hint">⚠️ Turn on Auto status above. Special days only post while it is on.</p>'}
+    ${sp.enabled ? `${sw('Post special days even on my off days', 'A festival on a day you skip still gets its wish', 'data-f="autoStatus.special.offDays" data-rr="1"', sp.offDays)}
+    ${todaySp ? `<div class="banner info small" style="margin:10px 0 0"><span>🎉 Today is <strong>${esc(todaySp.name)}</strong>, so today's status is its picture card.</span></div>` : ''}
+    <div class="sd-list">${rows.length ? rows.map(row).join('') : `<p class="muted small">No special days in the next ${sdAll ? 'year' : '60 days'}.</p>`}</div>
+    <div class="btns" style="margin-top:8px"><button type="button" class="btn sm ghost" data-act="sd-all">${sdAll ? 'Show only the next 60 days' : `Show all ${SPECIAL_DAYS.length} special days (next 12 months)`}</button></div>
+    <p class="hint">One status a day: on a special day the picture goes out at your status time instead of the quote. If the picture fails, the caption goes out as a text status. ${offNote} Moon-based days (Eid) can move by a day. Switch it off if your area celebrates on a different day.</p>` : ''}
+  </div>`;
+}
+function showCard(id) {
+  const d = SPECIAL_BY_ID[id];
+  if (!d) return;
+  const cap = D?.autoStatus?.special?.items?.[id]?.caption || d.caption;
+  const ov = document.createElement('div');
+  ov.className = 'sd-modal';
+  ov.setAttribute('role', 'dialog'); ov.setAttribute('aria-modal', 'true'); ov.setAttribute('aria-label', `${d.name} card`);
+  ov.innerHTML = `<div class="sd-box"><img src="${esc(cardUrl(id))}" alt="${esc(d.title)}: ${esc(d.line)}"><p class="sd-cap">${esc(cap)}</p><button type="button" class="btn sm" data-close="1">Close</button></div>`;
+  const close = () => { ov.remove(); document.removeEventListener('keydown', onKey); };
+  const onKey = (e) => { if (e.key === 'Escape') close(); };
+  ov.addEventListener('click', (e) => { if (e.target === ov || e.target.closest('[data-close]')) close(); });
+  document.addEventListener('keydown', onKey);
+  document.body.appendChild(ov);
+  ov.querySelector('[data-close]').focus();
+}
+function renderStatus() {
+  if (!D || D._id !== 'status') D = { ...clone(settings()), _kind: 'settings', _id: 'status' };
+  const a = D.autoStatus;
+  const days = (a.days || []).map(Number);
+  const everyDay = days.length === 7;
+  const aud = statusAudience(a, { contacts: contacts(), owner: '0000000000' });
+  const others = aud.numbers.length - 1;
+  const next = buildJobs({ ...planData(), settings: withDefaults(strip(D)) }, Date.now(), Date.now() + 8 * 86400000).find((j) => j.kind === 'status');
+  const audHint = a.audience === 'only'
+    ? (others ? `Goes to <b>${others}</b> ${others === 1 ? 'person' : 'people'} + you.` : '⚠️ Nobody picked yet. Tap people or lists above.')
+    : `Goes to <b>${others}</b> ${others === 1 ? 'person' : 'people'} from your Contacts${a.alsoRecent && a.audience !== 'only' ? ' + people who texted you in the last 30 days' : ''} + you.`;
+  view().innerHTML = `<button class="back" data-act="go" data-v="#/more">‹ More</button>
+  <div class="ph"><div><h1>Auto status</h1><p>Posts a WhatsApp status for you, on a schedule</p></div></div>
+  <div class="card"><h2>📸 Status</h2>
+    ${sw('Auto status', a.enabled ? (next ? `Next: ${esc(whenText(next.at))}` : 'Pick at least one day') : 'Off. Nothing is posted.', 'data-f="autoStatus.enabled" data-rr="1"', a.enabled)}
+    <div class="field" style="margin-top:10px"><span class="lbl">When</span><div class="seg" role="group"><button type="button" data-act="st-days" data-v="all" aria-pressed="${everyDay}">Every day</button><button type="button" data-act="st-days" data-v="pick" aria-pressed="${!everyDay}">Chosen days</button></div>
+      ${everyDay ? '' : `<div style="margin-top:8px">${wdPick('autoStatus.days', days)}</div>${days.length ? '' : '<p class="hint">⚠️ Pick at least one day.</p>'}`}</div>
+    <div class="field"><label for="stTime">Time</label><input id="stTime" type="time" data-f="autoStatus.time" data-rr="1" value="${esc(a.time)}"></div>
+  </div>
+  ${specialCard(a)}
+  <div class="card"><h2>✍️ What to post</h2>
+    ${seg('autoStatus.mode', [['quote', 'Motivational quote'], ['own', 'My own text'], ['photo', 'Photo']], a.mode || 'quote')}
+    <div style="margin-top:12px">${statusPreview(a)}</div>
+    ${(a.mode || 'quote') === 'quote' ? `<p class="hint">${QUOTES.length} short quotes built in (Kalam, Vivekananda, Jobs, Kobe, Sachin…). No repeats until all of them are used.</p>
+      ${sw('AI-fresh quote', 'The AI writes a new line each time (needs your GROQ_API_KEY). If the AI fails, a built-in quote is used.', 'data-f="autoStatus.aiFresh" data-rr="1"', a.aiFresh)}` : ''}
+    ${a.mode === 'own' ? `<div class="field" style="margin-top:10px"><label for="stTexts">Your statuses, one per line</label><textarea id="stTexts" data-f="autoStatus.texts" data-type="lines" data-rr="1" style="min-height:110px" placeholder="Grind now, shine later ✨&#10;New day, new code 💻">${esc((a.texts || []).join('\n'))}</textarea><p class="hint">Posted in turn: line 1, then line 2… then back to line 1.</p></div>` : ''}
+    ${a.mode === 'photo' ? `<div class="field" style="margin-top:10px"><label for="stUrl">Photo link (https://…jpg or .png)</label><input id="stUrl" type="url" data-f="autoStatus.photoUrl" value="${esc(a.photoUrl)}" placeholder="https://…/photo.jpg"></div>
+      <div class="field"><label for="stCap">Caption (optional)</label><input id="stCap" type="text" data-f="autoStatus.photoCaption" value="${esc(a.photoCaption)}"></div><p class="hint">Must be a direct image link anyone can open. If the link is missing or broken, a quote is posted instead.</p>` : ''}
+    ${a.mode !== 'photo' ? `<div class="field" style="margin-top:12px"><span class="lbl">Background colour</span><div class="swatches"><button type="button" class="sw-rot ${!/^#/.test(a.color || '') ? 'on' : ''}" data-act="st-color" data-v="rotate" aria-pressed="${!/^#/.test(a.color || '')}">🎨 Rotate</button>${STATUS_COLORS.map((c) => `<button type="button" class="sw-c ${a.color === c ? 'on' : ''}" style="background:${c}" data-act="st-color" data-v="${c}" aria-label="Colour ${c}" aria-pressed="${a.color === c}"></button>`).join('')}</div></div>
+      <div class="field"><span class="lbl">Font</span>${seg('autoStatus.font', [['rotate', 'Rotate'], ...STATUS_FONTS.map(([v, l]) => [String(v), l])], a.font ?? 'rotate')}</div>` : ''}
+  </div>
+  <div class="card"><h2>👀 Who sees it</h2>
+    ${seg('autoStatus.audience', [['all', 'All my contacts'], ['only', 'Only these…'], ['except', 'All except…']], a.audience || 'all')}
+    ${a.audience === 'only' || a.audience === 'except' ? `<p class="hint" style="margin-top:8px">${a.audience === 'only' ? 'Tap who should see it:' : 'Tap who should NOT see it:'}</p>${peopleChips('autoStatus')}` : ''}
+    ${a.audience !== 'only' ? sw('Also people who texted me lately', 'Anyone who messaged you in the last 30 days, even if they are not in Contacts', 'data-f="autoStatus.alsoRecent" data-rr="1"', a.alsoRecent) : ''}
+    <p class="hint">${audHint} WhatsApp doesn't give bots your phone's address book, so “contacts” means the people in the Contacts tab here. You always see your own status.</p>
+  </div>
+  <div class="card"><h2>🧪 Try it</h2>
+    <p class="muted small" style="margin-top:0">Posts the next status to <b>only you</b> (WhatsApp → Updates → My status). Delete it there afterwards if you like.</p>
+    <div class="btns"><button class="btn cy" data-act="st-test">Post test status now</button></div>
+  </div>
+  <div class="sticky-save"><button class="btn primary" data-act="st-save">Save auto status</button></div>`;
+}
+
 /* ---------------- screens ---------------- */
 function renderLogin(err = '') {
   const host = location.hostname.endsWith('.github.io') ? location.hostname.split('.')[0] : '';
@@ -235,7 +412,8 @@ function topStatus() {
   const st = status();
   const s = st.session?.status;
   const pill = S.demo ? '<span class="pill vi">DEMO</span>' : s === 'ok' ? '<span class="pill ok"><span class="dot"></span>Linked</span>' : s === 'logged_out' ? '<span class="pill bad"><span class="dot"></span>Logged out</span>' : '<span class="pill warn"><span class="dot"></span>Not linked</span>';
-  $('#topRight').innerHTML = (settings().paused || st.pausedByOwner ? '<span class="pill warn">⏸ Paused</span>' : '') + pill;
+  const busy = busyNow(settings(), st, Date.now()).active ? '<span class="pill cy" title="Busy mode is on" aria-label="Busy mode is on">🔕</span>' : '';
+  $('#topRight').innerHTML = (settings().paused || st.pausedByOwner ? '<span class="pill warn">⏸ Paused</span>' : '') + busy + pill;
 }
 
 function renderHome() {
@@ -265,14 +443,14 @@ function renderHome() {
       <div class="stat"><div class="k">❌ Failures</div><div class="v ${fails.length ? 'bad' : 'ok'}">${fails.length}</div><div class="s">last 7 days</div></div>
     </div>
     <div class="card glow"><h2>⏰ Next sends <span class="count">${jobs.length} in 7 days</span></h2>
-      <div class="list">${jobs.slice(0, 8).map((j) => `<div class="row"><div class="ic">${{ birthday: '🎂', festival: '🪔', group: '👥', broadcast: '📣', summary: '📊', alert: '🔔', followup: '↩️' }[j.kind] || '💬'}</div><div class="main"><div class="t">${esc(j.label)}</div><div class="d">→ ${esc(j.to.type === 'group' ? j.to.name : j.to.owner ? 'you' : j.to.name || j.to.number)}${j.header ? ' · 🤖 header' : ''}</div></div><div class="r stack">${esc(whenText(j.at).split(' · ')[0])}<b>${esc(pretty12(localTime(j.at, tz())))}</b></div></div>`).join('') || '<p class="empty">Nothing scheduled. Tap Schedules → ＋ to add one.</p>'}</div>
+      <div class="list">${jobs.slice(0, 8).map((j) => `<div class="row"><div class="ic">${{ birthday: '🎂', festival: '🪔', group: '👥', broadcast: '📣', summary: '📊', alert: '🔔', followup: '↩️', status: '📸' }[j.kind] || '💬'}</div><div class="main"><div class="t">${esc(j.label)}</div><div class="d">→ ${esc(j.to.type === 'group' ? j.to.name : j.to.owner ? 'you' : j.to.name || j.to.number)}${j.header ? ' · 🤖 header' : ''}</div></div><div class="r stack">${esc(whenText(j.at).split(' · ')[0])}<b>${esc(pretty12(localTime(j.at, tz())))}</b></div></div>`).join('') || '<p class="empty">Nothing scheduled. Tap Schedules → ＋ to add one.</p>'}</div>
     </div>
     ${fails.length ? `<div class="card"><h2>❌ Failures</h2><div class="list">${fails.slice(0, 5).map((f) => `<div class="row"><div class="ic">⚠️</div><div class="main"><div class="t">${esc(f.label || f.k)}</div><div class="d">${esc(f.err || '')}</div></div><div class="r">${esc(ago(f.t))}</div></div>`).join('')}</div></div>` : ''}
     <div class="card"><h2>🪔 Upcoming festivals <a class="count" href="#/festivals">manage</a></h2><div class="list">${fests.map((f) => `<a class="row" href="#/festival/${esc(f.id)}"><div class="ic">${esc(f.emoji || '🎉')}</div><div class="main"><div class="t">${esc(f.name)}</div><div class="d">${f.enabled && (f.to || []).length ? `✅ wishes on · ${esc(pretty12(f.time || festCfg().defaultTime || '00:00'))}` : 'off — tap to set up'}${f.lunar ? ' · date varies yearly' : ''}</div></div><div class="r when">${esc(prettyDate(f.date).replace(/^\w+, /, ''))}</div></a>`).join('')}</div></div>
     <div class="card"><h2>🧾 Recent activity <a class="count" href="#/logs">all logs</a></h2><div class="list">${log.slice(0, 6).map((e) => `<div class="row"><div class="ic">${e.s === 'sent' ? '✅' : e.s === 'failed' ? '❌' : '⏭️'}</div><div class="main"><div class="t">${esc(e.label || e.k)}</div><div class="d">${esc(e.to || '')}${e.lateSec > 120 ? ` · ${Math.round(e.lateSec / 60)} min late` : e.s === 'sent' ? ' · on time' : ''}</div></div><div class="r">${esc(ago(e.t))}</div></div>`).join('') || '<p class="empty">No messages sent yet.</p>'}</div></div>
     <div class="card"><h2>⚙️ Quick actions</h2>
       <div class="btns full"><button class="btn cy" data-act="run-now">▶ Run now</button><button class="btn ${s.paused ? 'primary' : ''}" data-act="pause">${s.paused ? '▶ Resume all' : '⏸ Pause all'}</button></div>
-      <p class="hint">GitHub ${run ? `last started the bot ${esc(ago(Date.parse(run.created_at)))} (${esc(run.conclusion || run.status)})` : 'has not started the bot yet'}. Scheduled messages go out on the exact minute; replies to incoming messages wait for the next check (≈30 min).</p>
+      <p class="hint">${run && run.status === 'in_progress' ? `🟢 The bot is online now (this run started ${esc(ago(Date.parse(run.created_at)))})` : `GitHub ${run ? `last started the bot ${esc(ago(Date.parse(run.created_at)))} (${esc(run.conclusion || run.status)})` : 'has not started the bot yet'}`}. Scheduled messages go out on the exact minute; ${alwaysOn() ? 'with Always on, replies to incoming messages are near-instant (a short gap about every 80 min while it hands over).' : 'replies to incoming messages wait for the next check (≈30 min).'}</p>
     </div>`;
 }
 
@@ -408,29 +586,33 @@ function renderContactEditor(id) {
 function renderReplies() {
   if (!D || D._id !== 'replies') D = { ...clone(settings()), _kind: 'settings', _id: 'replies' };
   const s = D;
-  view().innerHTML = `<div class="ph"><div><h1>Replies</h1><p>Auto-replies, away mode and AI replies</p></div></div>
-  <div class="banner warn"><span>⏱</span><div><b>These replies are delayed</b>GitHub wakes the bot about every 30 minutes, so replies to incoming messages arrive on the next check (up to ~30 min later) — not instantly. Scheduled messages are still exact.</div></div>
+  view().innerHTML = `<div class="ph"><div><h1>Replies</h1><p>Busy mode, auto-replies, away and AI replies</p></div></div>
+  ${alwaysOn() ? '' : '<div class="banner warn"><span>⏱</span><div><b>These replies are delayed</b>Always on is off (or the bot is paused), so GitHub wakes the bot about every 30 minutes and replies arrive on the next check — not instantly. Scheduled messages are still exact. Turn on Settings → Timing → Always on for near-instant replies.</div></div>'}
+  ${busyCard(s)}
   <div class="card"><h2>⚡ Auto-reply rules <span class="count">${rules().length}</span></h2>
-    ${sw('Auto-reply', 'Reply when a message matches a keyword', 'data-f="features.autoReply"', s.features.autoReply, delayedPill)}
-    <div class="list">${rules().map((r) => `<a class="row" href="#/rule/${esc(r.id)}"><div class="ic">${r.enabled === false ? '⏸️' : '⚡'}</div><div class="main"><div class="t">${esc(r.match)}: “${esc(r.pattern)}”</div><div class="d">→ ${esc(Array.isArray(r.reply) ? r.reply[0] : r.reply)}</div></div><div class="r">${esc(r.where || 'private')}</div></a>`).join('') || '<p class="empty">No rules yet.</p>'}</div>
+    ${sw('Auto-reply', 'Reply when a message matches a keyword', 'data-f="features.autoReply"', s.features.autoReply, delayedPill())}
+    ${sw('Also respond to stickers & GIFs', 'Off = stickers, GIFs, reactions and deleted messages never trigger auto-replies, away, AI or busy replies (good for busy groups)', 'data-f="replies.stickers"', !!s.replies?.stickers)}
+    <div class="list">${rules().map((r) => `<a class="row" href="#/rule/${esc(r.id)}"><div class="ic">${r.enabled === false ? '⏸️' : '⚡'}</div><div class="main"><div class="t">${esc(r.match)}: “${esc(r.pattern)}”</div><div class="d">→ ${r.react ? esc(r.react) + ' ' : ''}${esc((Array.isArray(r.reply) ? r.reply[0] : r.reply) || (r.react ? 'reaction only' : ''))}</div></div><div class="r">${esc({ private: 'private', groups: 'groups', both: 'both' }[r.where || 'private'] || r.where)}${(r.groups || []).length && r.where !== 'private' ? ` · ${r.groups.length} grp` : ''}${(r.contacts || []).length + (r.tags || []).length && r.where !== 'groups' ? ' · picked' : ''}</div></a>`).join('') || '<p class="empty">No rules yet.</p>'}</div>
     <div class="btns" style="margin-top:10px"><a class="btn sm cy" href="#/rule/new">＋ Add rule</a></div>
     <div class="field" style="margin-top:12px"><label for="ruleTest">Test a message</label><input id="ruleTest" type="text" placeholder="e.g. what's your price?"><p class="hint" id="ruleTestOut">Type to see which rule would answer.</p></div>
   </div>
   <div class="card"><h2>🌙 Away mode</h2>
-    ${sw('Away mode', 'Auto-reply once per person while you are away. You can also send !away / !back to yourself on WhatsApp.', 'data-f="features.away"', s.features.away, delayedPill)}
+    ${sw('Away mode', 'Auto-reply once per person while you are away. You can also send !away / !back to yourself on WhatsApp.', 'data-f="features.away"', s.features.away, delayedPill())}
     <div class="field" style="margin-top:10px"><label for="fAw">Away message</label><textarea id="fAw" data-f="away.message">${esc(s.away.message)}</textarea></div>
     ${sw('Only during these hours', 'Off = always away while Away mode is on', 'data-f="away.window.enabled"', s.away.window.enabled)}
     <div class="grid2" style="margin-top:10px"><div class="field"><label for="fAf">From</label><input id="fAf" type="time" data-f="away.window.from" value="${esc(s.away.window.from)}"></div><div class="field"><label for="fAt">To</label><input id="fAt" type="time" data-f="away.window.to" value="${esc(s.away.window.to)}"></div></div>
     <div class="field"><label for="fAh">Reply to the same person at most once every (hours)</label><input id="fAh" type="number" min="1" data-f="away.onceEveryHours" data-type="num" value="${esc(s.away.onceEveryHours)}"></div>
+    <div class="field"><span class="lbl">Who gets the away message</span>${seg('away.who', [['everyone', 'Everyone'], ['contacts', 'My contacts'], ['pick', 'Only these…']], whoMode(s.away.who))}${whoMode(s.away.who) === 'pick' ? peopleChips('away') : ''}<p class="hint">Private chats only. Never sent in groups.</p></div>
   </div>
   <div class="card"><h2>🧠 AI replies in your style</h2>
-    ${sw('AI replies', 'Uses the free Groq API. Needs the GROQ_API_KEY secret (SETUP step 11).', 'data-f="features.ai"', s.features.ai, delayedPill)}
+    ${sw('AI replies', 'Uses the free Groq API. Needs the GROQ_API_KEY secret (SETUP step 11).', 'data-f="features.ai"', s.features.ai, delayedPill())}
     <div class="field" style="margin-top:10px"><label for="fSp">Your style (how should it talk?)</label><textarea id="fSp" data-f="ai.stylePrompt" style="min-height:120px">${esc(s.ai.stylePrompt)}</textarea></div>
     <div class="field"><span class="lbl">Example chats (teach it how you reply)</span>
       ${(s.ai.examples || []).map((ex, i) => `<div class="card" style="padding:10px;margin-bottom:8px"><input type="text" aria-label="They say" data-f="ai.examples.${i}.them" value="${esc(ex.them)}" placeholder="They say…"><input type="text" aria-label="You reply" style="margin-top:6px" data-f="ai.examples.${i}.me" value="${esc(ex.me)}" placeholder="You reply…"><button class="btn sm ghost" data-act="ex-rm" data-i="${i}" style="margin-top:6px">Remove</button></div>`).join('')}
       <button class="btn sm" data-act="ex-add">＋ Add example</button></div>
-    <div class="field"><span class="lbl">Who gets AI replies</span>${seg('ai.who', [['contacts', 'My contacts'], ['tags', 'Some tags'], ['everyone', 'Everyone']], s.ai.who)}</div>
-    <div class="field"><label for="fAiT">Tags (when "Some tags")</label><input id="fAiT" type="text" data-f="ai.tags" data-type="csv" value="${esc((s.ai.tags || []).join(', '))}" placeholder="friends"></div>
+    <div class="field"><span class="lbl">Who gets AI replies (private chats)</span>${seg('ai.who', [['contacts', 'My contacts'], ['pick', 'Only these…'], ['everyone', 'Everyone']], whoMode(s.ai.who))}${whoMode(s.ai.who) === 'pick' ? peopleChips('ai') : ''}</div>
+    <div class="field"><span class="lbl">AI in groups</span>${groupScope('ai.groups', s.ai.groups, [['none', 'No groups'], ['pick', 'Only these groups']], { none: 'The AI never answers in groups.', pick: 'It answers there only when someone @mentions you or replies to your message.' })}</div>
+    ${sw('Also react with an emoji', 'The AI picks one fitting reaction (❤️ 👍 😂 😮 😢 🙏 🔥 🎉) or none, on the same messages it answers', 'data-f="ai.react"', s.ai.react)}
     <div class="grid2"><div class="field"><label for="fAiM">Memory (messages)</label><input id="fAiM" type="number" min="0" max="20" data-f="ai.memory" data-type="num" value="${esc(s.ai.memory)}"></div><div class="field"><label for="fAiC">Max replies / chat / day</label><input id="fAiC" type="number" min="1" data-f="ai.maxPerChatPerDay" data-type="num" value="${esc(s.ai.maxPerChatPerDay)}"></div></div>
     <div class="field"><label for="fAiModel">Model</label><input id="fAiModel" type="text" data-f="ai.model" value="${esc(s.ai.model)}"><p class="hint">Free plan default: openai/gpt-oss-120b (30 requests/min, 1,000/day).</p></div>
   </div>
@@ -443,16 +625,25 @@ function renderReplies() {
 
 function renderRuleEditor(id) {
   const existing = rules().find((r) => r.id === id);
-  if (!D || D._id !== id) D = { ...(existing ? clone(existing) : { id: uid('r'), enabled: true, match: 'contains', pattern: '', caseSensitive: false, reply: '', where: 'private', contacts: [], tags: [], exclude: [], cooldownMinutes: 60 }), _id: id, _kind: 'rule' };
+  if (!D || D._id !== id) {
+    D = { ...(existing ? clone(existing) : { id: uid('r'), enabled: true, match: 'contains', pattern: '', caseSensitive: false, reply: '', react: '', where: 'private', contacts: [], tags: [], groups: [], exclude: [], cooldownMinutes: 60 }), _id: id, _kind: 'rule' };
+    D._people = (D.contacts || []).length || (D.tags || []).length ? 'pick' : 'all';
+    D._groups = (D.groups || []).length ? 'pick' : 'all';
+  }
+  const where = D.where || 'private';
   view().innerHTML = `<button class="back" data-act="back">‹ Replies</button>
-  <div class="ph"><div><h1>${existing ? 'Edit rule' : 'New rule'}</h1><p>Replies arrive on the next check (≈30 min)</p></div></div>
+  <div class="ph"><div><h1>${existing ? 'Edit rule' : 'New rule'}</h1><p>${alwaysOn() ? 'Replies go out within seconds while the bot is online' : 'Replies arrive on the next check (≈30 min)'}</p></div></div>
   <div class="card">
     <div class="field"><span class="lbl">When a message…</span>${seg('match', [['contains', 'contains'], ['exact', 'is exactly'], ['startsWith', 'starts with'], ['regex', 'regex']], D.match)}</div>
     <div class="field"><label for="fPat">Words</label><input id="fPat" type="text" data-f="pattern" value="${esc(D.pattern)}" placeholder="price, cost, rate"><p class="hint">"contains": separate options with commas.</p></div>
     ${sw('Match capital letters exactly', '', 'data-f="caseSensitive"', D.caseSensitive)}
     <div class="field" style="margin-top:10px"><label for="fRep">Reply (one per line = random pick)</label><textarea id="fRep" data-f="reply" data-type="lines">${esc(Array.isArray(D.reply) ? D.reply.join('\n') : D.reply)}</textarea>${placeholderChips('fRep')}</div>
-    <div class="field"><span class="lbl">Where</span>${seg('where', [['private', 'Private chats'], ['groups', 'Groups'], ['both', 'Both']], D.where || 'private')}</div>
-    <div class="field"><label for="fRt">Only for these tags (empty = everyone)</label><input id="fRt" type="text" data-f="tags" data-type="csv" value="${esc((D.tags || []).join(', '))}"></div>
+    <div class="field"><span class="lbl">React with an emoji</span><div class="chips">${['', ...REACTIONS].map((e) => `<button type="button" class="chip ${(D.react || '') === e ? 'on' : ''}" data-act="r-react" data-v="${esc(e)}" aria-pressed="${(D.react || '') === e}">${e || 'No reaction'}</button>`).join('')}</div><p class="hint">Puts the emoji on their message. Leave the reply empty for “reaction only”.</p></div>
+  </div>
+  <div class="card"><h2>👀 Who this rule works for</h2>
+    <div class="field"><span class="lbl">Where</span>${seg('where', [['private', 'Private chats'], ['groups', 'Groups'], ['both', 'Both']], where)}</div>
+    ${where !== 'groups' ? `<div class="field"><span class="lbl">People (private chats)</span><div class="seg" role="group">${[['all', 'Everyone'], ['pick', 'Only these…']].map(([v, l]) => `<button type="button" data-act="r-people" data-v="${v}" aria-pressed="${D._people === v}">${l}</button>`).join('')}</div>${D._people === 'pick' ? peopleChips('') : ''}</div>` : ''}
+    ${where !== 'private' ? `<div class="field"><span class="lbl">Groups</span>${groupScope('groups', D._groups === 'pick' ? D.groups || [] : 'all', [['all', 'All groups'], ['pick', 'Only these groups']], { all: 'Works in every group you are in.', pick: 'In these groups it answers anyone.' })}</div>` : ''}
     <div class="field"><label for="fCd">Cooldown per chat (minutes)</label><input id="fCd" type="number" min="0" data-f="cooldownMinutes" data-type="num" value="${esc(D.cooldownMinutes ?? 60)}"><p class="hint">Stops the bot replying again and again in the same chat.</p></div>
     ${sw('Rule on', '', 'data-f="enabled"', D.enabled !== false)}
   </div>
@@ -463,6 +654,7 @@ function renderRuleEditor(id) {
 function renderMore() {
   view().innerHTML = `<div class="ph"><div><h1>More</h1></div></div>
   <div class="card"><div class="list">
+    <a class="row" href="#/status"><div class="ic">📸</div><div class="main"><div class="t">Auto status</div><div class="d">${settings().autoStatus?.enabled ? 'On · ' + esc(pretty12(settings().autoStatus.time)) : 'Off'} · motivational quotes or your own text</div></div><div class="r">›</div></a>
     <a class="row" href="#/festivals"><div class="ic">🪔</div><div class="main"><div class="t">Festivals & occasions</div><div class="d">Diwali, Sankranti, Eid, New Year… 2026–2027</div></div><div class="r">›</div></a>
     <a class="row" href="#/templates"><div class="ic">📝</div><div class="main"><div class="t">Templates</div><div class="d">Reusable messages with {name}, {date}…</div></div><div class="r">›</div></a>
     <a class="row" href="#/groups"><div class="ic">👥</div><div class="main"><div class="t">Group tools</div><div class="d">Welcome, anti-link, !tagall, !rules</div></div><div class="r">›</div></a>
@@ -541,7 +733,8 @@ function renderGroups() {
   const ids = [...new Set([...seenGroups().map((g) => g.id), ...Object.keys(cfg)])];
   view().innerHTML = `<button class="back" data-act="go" data-v="#/more">‹ More</button>
   <div class="ph"><div><h1>Group tools</h1><p>Welcome new members, block links, !tagall, !rules</p></div></div>
-  <div class="banner warn"><span>⏱</span><div><b>Delayed</b>Group tools act on the next check (≈30 min). Deleting links or removing people only works where your number is a group admin.</div></div>
+  <div class="banner warn"><span>⏱</span><div><b>${alwaysOn() ? 'Admin needed' : 'Delayed'}</b>${alwaysOn() ? '' : 'Group tools act on the next check (≈30 min). '}Deleting links or removing people only works where your number is a group admin.</div></div>
+  <p class="hint" style="margin:0 2px 10px">Welcome and anti-link only run in the groups you switch them on for below. Who can use !tagall / !rules is set in Settings → Commands → In groups.</p>
   <div class="card"><div class="list">${ids.map((id) => { const g = seenGroups().find((x) => x.id === id); const c = cfg[id] || {}; return `<a class="row" href="#/group/${encodeURIComponent(id)}"><div class="ic">👥</div><div class="main"><div class="t">${esc(g?.name || c.name || id)} ${g?.admin ? '<span class="pill ok tiny">admin</span>' : ''}</div><div class="d">${[c.welcome?.enabled && 'welcome', c.antiLink?.enabled && 'anti-link', c.rulesText && 'rules'].filter(Boolean).join(' · ') || 'no tools on'}${g ? ` · ${g.size} members` : ''}</div></div><div class="r">›</div></a>`; }).join('') || '<p class="empty">Your groups show up here after the bot\'s first run.</p>'}</div></div>`;
 }
 function renderGroupEditor(id) {
@@ -550,9 +743,9 @@ function renderGroupEditor(id) {
   if (!D || D._id !== id) D = { name: g?.name || c.name || '', welcome: { enabled: false, message: 'Welcome {name} to {group}! 👋', ...(c.welcome || {}) }, antiLink: { enabled: false, action: 'warn', warnLimit: 3, allowDomains: [], ...(c.antiLink || {}) }, rulesText: c.rulesText || '', tagallAdminsOnly: c.tagallAdminsOnly !== false, _id: id, _kind: 'group' };
   view().innerHTML = `<button class="back" data-act="go" data-v="#/groups">‹ Groups</button>
   <div class="ph"><div><h1>${esc(D.name || 'Group')}</h1><p class="mono tiny">${esc(id)}</p></div></div>
-  <div class="card">${sw('Welcome new members', 'Mentions them with this message', 'data-f="welcome.enabled"', D.welcome.enabled, delayedPill)}
+  <div class="card">${sw('Welcome new members', 'Mentions them with this message', 'data-f="welcome.enabled"', D.welcome.enabled, delayedPill())}
     <div class="field" style="margin-top:10px"><label for="fGw">Welcome message</label><textarea id="fGw" data-f="welcome.message">${esc(D.welcome.message)}</textarea><p class="hint">{name} = the new member(s), {group} = group name</p></div></div>
-  <div class="card">${sw('Anti-link', 'Warn people who post links', 'data-f="antiLink.enabled"', D.antiLink.enabled, delayedPill)}
+  <div class="card">${sw('Anti-link', 'Warn people who post links', 'data-f="antiLink.enabled"', D.antiLink.enabled, delayedPill())}
     <div class="field" style="margin-top:10px"><span class="lbl">Action</span>${seg('antiLink.action', [['warn', 'Warn only'], ['delete', 'Delete + warn'], ['remove', 'Delete, remove after limit']], D.antiLink.action)}</div>
     <div class="grid2"><div class="field"><label for="fGl">Warnings before removal</label><input id="fGl" type="number" min="1" data-f="antiLink.warnLimit" data-type="num" value="${esc(D.antiLink.warnLimit)}"></div><div class="field"><label for="fGa">Allowed sites</label><input id="fGa" type="text" data-f="antiLink.allowDomains" data-type="csv" value="${esc((D.antiLink.allowDomains || []).join(', '))}" placeholder="github.com"></div></div></div>
   <div class="card"><div class="field"><label for="fGr">!rules text</label><textarea id="fGr" data-f="rulesText">${esc(D.rulesText)}</textarea></div>
@@ -564,7 +757,7 @@ function renderSettings() {
   if (!D || D._id !== 'settings') D = { ...clone(settings()), _kind: 'settings', _id: 'settings' };
   const s = D;
   const F = s.features;
-  const feat = (k, t, d, delayed = false) => sw(t, d, `data-f="features.${k}"`, F[k], delayed ? delayedPill : '');
+  const feat = (k, t, d, delayed = false) => sw(t, d, `data-f="features.${k}"`, F[k], delayed ? delayedPill() : '');
   const hd = s.header.defaults;
   view().innerHTML = `<button class="back" data-act="go" data-v="#/more">‹ More</button>
   <div class="ph"><div><h1>Settings</h1><p>Everything can be switched on or off</p></div></div>
@@ -598,7 +791,7 @@ function renderSettings() {
     <span class="lbl" style="margin-top:10px;display:block">Preview</span>${messagePreview('Class starts at 9:30 ⏰', 'group')}</div>
   <div class="card"><h2>⏰ Timing</h2>
     <div class="grid2"><div class="field"><label for="sLa">Look-ahead (min)</label><input id="sLa" type="number" min="20" max="80" data-f="timing.lookaheadMinutes" data-type="num" value="${esc(s.timing.lookaheadMinutes)}"></div><div class="field"><label for="sLg">Send if late up to (min)</label><input id="sLg" type="number" min="0" data-f="timing.lateGraceMinutes" data-type="num" value="${esc(s.timing.lateGraceMinutes)}"></div></div>
-    ${sw('Relay runs (recommended)', 'Starts the next run early when a message is due soon, so it lands on the minute even if GitHub\'s timer is late', 'data-f="timing.relay"', s.timing.relay)}
+    ${sw('Always on (recommended)', 'Keeps the bot connected all day: each run starts the next one before it ends, so messages go out on the minute and replies are near-instant — even when GitHub\'s timer skips. Off = the bot only wakes when GitHub\'s timer fires (can be hours late).', 'data-f="timing.relay"', s.timing.relay)}
     <div class="field" style="margin-top:10px"><label for="sHd">Human-like delay (± minutes, for schedules that turn it on)</label><input id="sHd" type="number" min="1" max="60" data-f="humanDelay.minutes" data-type="num" value="${esc(s.humanDelay.minutes)}"></div></div>
   <div class="card"><h2>📣 Lists / broadcast</h2>
     <div class="banner warn" style="margin-bottom:10px"><span>⚠️</span><div><b>Ban risk</b>WhatsApp bans numbers that mass-message people who don't know them. Only message people who saved your number, keep the daily cap low, and use a spare number if you can.</div></div>
@@ -613,15 +806,24 @@ function renderSettings() {
     <div class="field"><label for="sFm">Message</label><textarea id="sFm" data-f="followup.message">${esc(s.followup.message)}</textarea></div>
     <div class="field"><label for="sFg">For contacts with these tags</label><input id="sFg" type="text" data-f="followup.tags" data-type="csv" value="${esc((s.followup.tags || []).join(', '))}" placeholder="clients"><p class="hint">Only after a message YOU sent got no answer. Sent once per message.</p></div></div>
   <div class="card"><h2>📊 Daily summary</h2><div class="field"><label for="sSt">Send at</label><input id="sSt" type="time" data-f="summary.time" value="${esc(s.summary.time)}"></div></div>
+  <div class="card"><h2>🗓️ Weekly report</h2>
+    ${sw('Weekly report to me', 'Who texted you most, busiest groups, this week vs last week, busiest hour', 'data-f="weekly.enabled"', s.weekly.enabled !== false)}
+    <div class="field" style="margin-top:10px"><span class="lbl">Day</span>${seg('weekly.day', WEEKDAYS.map((w, i) => [String(i), w]), String(s.weekly.day ?? 0))}</div>
+    <div class="field"><label for="sWt">At</label><input id="sWt" type="time" data-f="weekly.time" value="${esc(s.weekly.time)}"></div>
+    <p class="hint">Counts only: the bot saves how many messages each chat sent per day, never the text.</p>
+    <div class="btns" style="margin-top:10px"><button class="btn sm" data-act="wk-test">Send me this week's report now</button></div></div>
   <div class="card"><h2>⌨️ Commands</h2>
-    <div class="field"><span class="lbl">Who can use them</span>${seg('commands.allow', [['everyone', 'Everyone'], ['contacts', 'My contacts'], ['owner', 'Only me']], s.commands.allow)}</div>
-    ${sw('Allow in groups', '', 'data-f="commands.inGroups"', s.commands.inGroups)}
+    <div class="field"><span class="lbl">Who can use them in private chats</span>${seg('commands.allow', [['owner', 'Only me'], ['contacts', 'My contacts'], ['pick', 'Only these…'], ['everyone', 'Everyone']], whoMode(s.commands.allow))}${whoMode(s.commands.allow) === 'pick' ? peopleChips('commands') : ''}</div>
+    <div class="field"><span class="lbl">In groups</span>${groupScope('commands.groups', s.commands.inGroups === false ? 'none' : s.commands.groups, [['none', 'No groups'], ['pick', 'Only these groups'], ['all', 'Any group']], { none: 'Nobody can use commands in groups (except you).', pick: 'Anyone in these groups can use them (!tagall still follows the admin setting in Group tools).', all: 'Any group, but only the people chosen above.' })}<p class="hint">You can always use every command, everywhere.</p></div>
     ${['help', 'weather', 'sticker', 'pdf', 'tagall', 'rules'].map((k) => sw('!' + k, '', `data-f="commands.enabled.${k}"`, s.commands.enabled[k])).join('')}
     ${sw('!yt (experimental)', 'YouTube often blocks GitHub servers, so this may fail', 'data-f="commands.enabled.yt"', s.commands.enabled.yt)}</div>
-  <div class="card"><h2>🎤 Voice notes</h2><div class="field"><span class="lbl">Send the transcript to</span>${seg('voice.sendTo', [['owner', 'Me (private)'], ['chat', 'Reply in that chat']], s.voice.sendTo)}</div></div>
+  <div class="card"><h2>🎤 Voice notes</h2><div class="field"><span class="lbl">Send the transcript to</span>${seg('voice.sendTo', [['owner', 'Me (private)'], ['chat', 'Reply in that chat']], s.voice.sendTo)}</div>
+    <div class="field"><span class="lbl">Whose voice notes</span>${seg('voice.who', [['everyone', 'Everyone'], ['contacts', 'My contacts'], ['pick', 'Only these…']], whoMode(s.voice.who))}${whoMode(s.voice.who) === 'pick' ? peopleChips('voice') : ''}<p class="hint">Private chats only.</p></div></div>
   <div class="card"><h2>💾 Saved media</h2>
     ${sw('Save statuses', 'Image/video statuses seen while the bot is connected', 'data-f="media.statuses"', s.media.statuses)}
     ${sw('Save media from chats', '', 'data-f="media.chats"', s.media.chats)}
+    <div class="field" style="margin-top:10px"><span class="lbl">From whom</span>${seg('media.who', [['everyone', 'Everyone'], ['contacts', 'My contacts'], ['pick', 'Only these…']], whoMode(s.media.who))}${whoMode(s.media.who) === 'pick' ? peopleChips('media') : ''}<p class="hint">Also decides whose statuses are saved.</p></div>
+    <div class="field"><span class="lbl">From groups</span>${groupScope('media.groups', s.media.groups, [['none', 'No groups'], ['pick', 'Only these groups'], ['all', 'Any group']], { none: 'Nothing is saved from groups.', pick: 'Everything sent in these groups is saved.', all: 'Any group, but only from the people chosen above.' })}</div>
     <div class="grid2"><div class="field"><label for="sMm">Max file size (MB)</label><input id="sMm" type="number" min="1" max="20" data-f="media.maxFileMB" data-type="num" value="${esc(s.media.maxFileMB)}"></div><div class="field"><label for="sMt">Keep up to (MB total)</label><input id="sMt" type="number" min="50" max="900" data-f="media.totalCapMB" data-type="num" value="${esc(s.media.totalCapMB)}"></div></div></div>
   <div class="card"><h2>🔔 Alerts to me</h2>
     ${sw('GitHub watcher', 'New stars, forks, issues and PRs on your public repos', 'data-f="alerts.github.enabled"', s.alerts.github.enabled)}
@@ -659,7 +861,7 @@ const routes = [
   [/^#\/more$/, renderMore, 'more'], [/^#\/festivals$/, renderFestivals, 'more'], [/^#\/festival\/(.+)$/, renderFestivalEditor, 'more'],
   [/^#\/templates$/, renderTemplates, 'more'], [/^#\/template\/(.+)$/, renderTemplateEditor, 'more'],
   [/^#\/groups$/, renderGroups, 'more'], [/^#\/group\/(.+)$/, (id) => renderGroupEditor(decodeURIComponent(id)), 'more'],
-  [/^#\/settings$/, renderSettings, 'more'], [/^#\/logs$/, renderLogs, 'more'],
+  [/^#\/settings$/, renderSettings, 'more'], [/^#\/logs$/, renderLogs, 'more'], [/^#\/status$/, renderStatus, 'more'],
 ];
 function route() {
   const h = location.hash || '#/home';
@@ -687,6 +889,7 @@ function onField(e) {
   const el = e.target.closest('[data-f]');
   if (!el || !D) return;
   setPath(D, el.dataset.f, readInput(el));
+  if (el.dataset.rr) { if (e.type === 'change') rerender(); return; } // re-draw after the change (not on every key)
   if (el.dataset.f === 'templateId' || el.dataset.f === 'humanDelay.enabled' || el.dataset.f === 'wishBirthday') { rerender(); return; }
   refreshPreview();
 }
@@ -712,8 +915,8 @@ async function onClick(e) {
       case 'back': history.back(); break;
       case 'go': location.hash = b.dataset.v; break;
       case 'reload': toast('Refreshing…'); await loadAll(); rerender(); toast('Up to date ✓', 'ok'); break;
-      case 'run-now': await api.dispatch({ action: 'run' }); toast('Started ✓ — the bot runs in about a minute', 'ok'); break;
-      case 'pause': { const s = settings(); s.paused = !s.paused; await save('settings', s); renderHome(); topStatus(); break; }
+      case 'run-now': await api.dispatch({ action: 'run' }); toast('Started ✓ — the bot runs in 1–3 min', 'ok'); break;
+      case 'pause': { const before = settings(); const s = settings(); s.paused = !s.paused; await save('settings', s); renderHome(); topStatus(); await kickIfResumed(before, s); break; }
       case 'rm-target': D.to.splice(Number(b.dataset.i), 1); rerender(); break;
       case 'wd': { const list = getPath(D, b.dataset.field) || []; const i = Number(b.dataset.i); setPath(D, b.dataset.field, list.includes(i) ? list.filter((x) => x !== i) : [...list, i].sort()); rerender(); break; }
       case 'add-date': { const v = $('#addDateVal').value; if (!isValidDate(v)) { toast('Pick a date first', 'bad'); break; } const list = getPath(D, b.dataset.field) || []; if (!list.includes(v)) setPath(D, b.dataset.field, [...list, v].sort()); rerender(); break; }
@@ -730,11 +933,22 @@ async function onClick(e) {
         const item = strip(D); if (!item.start) item.start = null; if (!item.end) item.end = null;
         await saveList('schedules', 'schedules', replaceIn(schedules(), item));
         if (a === 'sch-save') { D = null; location.hash = '#/schedules'; }
-        else { await api.dispatch({ action: a === 'sch-test' ? 'test-send' : 'send-now', target: item.id }); toast(a === 'sch-test' ? 'Test started ✓ — check your WhatsApp in 1–2 min' : 'Sending ✓ — goes out in 1–2 min', 'ok'); D._id = item.id; if (location.hash !== `#/schedule/${item.id}`) history.replaceState(null, '', `#/schedule/${item.id}`); }
+        else { await api.dispatch({ action: a === 'sch-test' ? 'test-send' : 'send-now', target: item.id }); toast(a === 'sch-test' ? 'Test started ✓ — check your WhatsApp in 1–3 min' : 'Sending ✓ — goes out in 1–3 min', 'ok'); D._id = item.id; if (location.hash !== `#/schedule/${item.id}`) history.replaceState(null, '', `#/schedule/${item.id}`); }
         break;
       }
       case 'sch-del': if (confirm('Delete this schedule?')) { await saveList('schedules', 'schedules', schedules().filter((x) => x.id !== D.id)); D = null; location.hash = '#/schedules'; } break;
       case 'ctag': contactFilter.tag = b.dataset.v; renderContacts(); break;
+      case 'pick': { const path = b.dataset.path, v = b.dataset.v; const list = getPath(D, path) || []; setPath(D, path, list.includes(v) ? list.filter((x) => x !== v) : [...(Array.isArray(list) ? list : []), v]); rerender(); break; }
+      case 'gscope': {
+        const path = b.dataset.path, v = b.dataset.v;
+        if (D._kind === 'rule') { D._groups = v; if (v !== 'pick') D.groups = []; rerender(); break; }
+        const cur = getPath(D, path);
+        setPath(D, path, v === 'pick' ? (Array.isArray(cur) ? cur : []) : v);
+        if (path === 'commands.groups') D.commands.inGroups = v !== 'none';
+        rerender(); break;
+      }
+      case 'r-people': D._people = b.dataset.v; if (D._people === 'all') { D.contacts = []; D.tags = []; } rerender(); break;
+      case 'r-react': D.react = b.dataset.v; rerender(); break;
       case 'tag-toggle': { const t = b.dataset.v; D.tags = (D.tags || []).includes(t) ? D.tags.filter((x) => x !== t) : [...(D.tags || []), t]; rerender(); break; }
       case 'bd-noyear': { const bd = D.birthday || ''; D.birthday = b.checked ? (bd.length === 10 ? bd.slice(5) : '01-01') : (bd.length === 5 ? `2000-${bd}` : ''); rerender(); break; }
       case 'c-save': {
@@ -754,9 +968,51 @@ async function onClick(e) {
       }
       case 'ex-add': D.ai.examples = [...(D.ai.examples || []), { them: '', me: '' }]; await save('settings', strip(D)); rerender(); break;
       case 'ex-rm': D.ai.examples.splice(Number(b.dataset.i), 1); await save('settings', strip(D)); rerender(); break;
-      case 'settings-save': await save('settings', strip(D)); topStatus(); break;
+      case 'busy-dur': busyDur = b.dataset.v; rerender(); break;
+      case 'busy-on': case 'busy-off': {
+        const now = Date.now();
+        let until = 0;
+        if (a === 'busy-on') {
+          if (busyDur === 'until') {
+            const v = $('#busyUntil')?.value; if (!isValidTime(v)) throw new Error('Pick the time you are back');
+            const today = localDate(now, tz());
+            const at = (d) => zonedToUtc(d, v, tz());
+            until = at(today) > now ? at(today) : at(localDate(now + 86400000, tz()));
+          } else until = now + Number(busyDur) * 60000;
+        }
+        D.busy = { ...(D.busy || {}), on: a === 'busy-on', until, setAt: now };
+        const after = strip(D); await save('settings', after); topStatus();
+        toast(a === 'busy-on' ? `Busy until ${busyTimeText(until, now, tz())} ✓ — the bot picks it up within a few minutes` : 'Busy mode off ✓', 'ok');
+        rerender(); break;
+      }
+      case 'st-days': D.autoStatus.days = b.dataset.v === 'all' ? [0, 1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5]; rerender(); break;
+      case 'st-color': D.autoStatus.color = b.dataset.v; rerender(); break;
+      case 'sd-all': sdAll = !sdAll; rerender(); break;
+      case 'sd-prev': showCard(b.dataset.v); break;
+      case 'st-save': case 'st-test': case 'sd-test': {
+        const as = D.autoStatus;
+        if (as.enabled && !(as.days || []).length) throw new Error('Pick at least one day');
+        if (!isValidTime(as.time)) throw new Error('Pick a time');
+        if (as.mode === 'own' && !(as.texts || []).length) throw new Error('Write at least one status, one per line');
+        if (as.mode === 'photo' && as.photoUrl && !/^https:\/\/\S+$/i.test(as.photoUrl)) throw new Error('The photo link must start with https://');
+        if (as.enabled && as.audience === 'only' && !(as.contacts || []).length && !(as.tags || []).length) throw new Error('Pick who should see it, or choose All my contacts');
+        await save('settings', strip(D));
+        if (a === 'st-test') { await api.dispatch({ action: 'test-send', target: '@status' }); toast('Test started ✓ — check WhatsApp → Updates → My status in 1–3 min', 'ok'); }
+        if (a === 'sd-test') { await api.dispatch({ action: 'test-send', target: `@special:${b.dataset.v}` }); toast(`Test started ✓ — the ${SPECIAL_BY_ID[b.dataset.v]?.name || 'special day'} card goes to only you. Check WhatsApp → Updates → My status in 1–3 min`, 'ok'); }
+        rerender(); break;
+      }
+      case 'wk-test': await save('settings', strip(D)); await api.dispatch({ action: 'test-send', target: '@report' }); toast('Started ✓ — the report reaches your WhatsApp in 1–3 min', 'ok'); break;
+      case 'settings-save': { const before = settings(); const after = strip(D); await save('settings', after); topStatus(); await kickIfResumed(before, after); break; }
       case 'gen-topic': { const t = 'vrbot-' + Array.from(crypto.getRandomValues(new Uint8Array(9)), (x) => x.toString(36).padStart(2, '0')).join('').slice(0, 16); D.alerts.form.ntfyTopic = t; $('#sNt').value = t; break; }
-      case 'r-save': { if (!D.pattern.trim()) throw new Error('Add the words to match'); if (!(Array.isArray(D.reply) ? D.reply.length : String(D.reply).trim())) throw new Error('Write a reply'); await saveList('rules', 'rules', replaceIn(rules(), strip(D))); D = null; location.hash = '#/replies'; break; }
+      case 'r-save': {
+        if (!D.pattern.trim()) throw new Error('Add the words to match');
+        if (!(Array.isArray(D.reply) ? D.reply.length : String(D.reply || '').trim()) && !D.react) throw new Error('Write a reply or pick a reaction');
+        const w = D.where || 'private';
+        if (w !== 'groups' && D._people === 'pick' && !(D.contacts || []).length && !(D.tags || []).length) throw new Error('Pick at least one person or list, or choose Everyone');
+        if (w !== 'private' && D._groups === 'pick' && !(D.groups || []).length) throw new Error('Pick at least one group, or choose All groups');
+        const item = strip(D); delete item._people; delete item._groups;
+        await saveList('rules', 'rules', replaceIn(rules(), item)); D = null; location.hash = '#/replies'; break;
+      }
       case 'r-del': if (confirm('Delete this rule?')) { await saveList('rules', 'rules', rules().filter((x) => x.id !== D.id)); D = null; location.hash = '#/replies'; } break;
       case 'fest-default': break;
       case 'f-save': {

@@ -156,7 +156,7 @@ export class FakeWA {
   async start() { setTimeout(() => this.inbox.length && this.handlers.upsert?.({ type: 'notify', messages: this.inbox }), 10); return this; }
   async waitOpen() {}
   async waitPending() { await sleep(100); }
-  async send(jid, content) { const id = 'FAKE' + (this.sent.length + 1); this.sent.push({ jid, content }); log.info(`(dry-run) would send to ${isJidGroup(jid) ? 'a group' : 'a chat'}`); return { key: { id, remoteJid: jid, fromMe: true } }; }
+  async send(jid, content, opts = {}) { const id = 'FAKE' + (this.sent.length + 1); this.sent.push({ jid, content, opts }); log.info(jid === 'status@broadcast' ? `(dry-run) would post a ${content.image ? 'photo' : 'text'} status for ${(opts.statusJidList || []).length} people (font ${opts.font ?? '-'}, colour ${opts.backgroundColor || '-'})` : `(dry-run) would send to ${isJidGroup(jid) ? 'a group' : 'a chat'}`); return { key: { id, remoteJid: jid, fromMe: true } }; }
   async exists(d) { return { exists: true, jid: numberJid(d) }; }
   async pnFor(jid, alt) { return jidNumber(alt || jid); }
   me() { return '919999999999'; }

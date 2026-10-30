@@ -8,15 +8,18 @@
  Panel (PWA) ── GitHub API ──► main branch: data/*.json   (encrypted settings, contacts, schedules…)
    ▲   token + password              │
    │                                 ▼
-   │                      Actions "VR Bot — Run"  (cron 13,43 * * * *  + relay runs)
+   │                      Actions "VR Bot — Run"  (always on: each run starts the next)
    │                        1. checkout main, npm ci
    │                        2. pull vr-state branch → decrypt session + sent-log
    │                        3. connect to WhatsApp (Baileys, linked device)
    │                        4. read messages that arrived while offline → replies/commands
    │                        5. plan sends due in the next 45 min → sleep → send at hh:mm:00
    │                           (re-reads data/ every 4 min, so pause/edit works mid-wait)
-   │                        6. relay: if the next send is < 75 min away, start a run that waits for it
+   │                        6. stay connected ~75–85 min (always on); hand over at a quiet moment,
+   │                           or early if Run now / Test / Pair is waiting
    │                        7. save step (always): encrypt + force-push vr-state
+   │                        8. chain step (always): start the next run unless one is already waiting
+   │                      Actions "VR Bot — Watchdog" (cron 7,27,47): start a run if none is alive
    └──── reads (encrypted) ◄── vr-state branch: status, sentlog, logs, memory, session
 ```
 
@@ -26,7 +29,7 @@
 - **Dedupe key**: `kind:sourceId:YYYY-MM-DDTHH:MM:recipient`. The sent-log stores every key with its result. A key is never sent twice; failures retry up to 3 times, then are marked failed and you get a WhatsApp alert.
 - **Late runs**: the window is `[now − 180 min, now + look-ahead)`, so a run that starts late still sends what was missed (marked late).
 - **Human-like delay** uses a seeded random from the key, so every run computes the same send time — no doubles, no skips.
-- **Precision**: when a run is alive, sends go out within a few seconds of the minute. With relay runs on, a run is usually alive for every send. Without a live run (GitHub outage, dropped job), the send happens as soon as the next run starts.
+- **Precision**: when a run is alive, sends go out within a few seconds of the minute. With Always on, a run is alive all the time (`src/chain.js`): runs hand over to each other via `workflow_dispatch` (allowed with `GITHUB_TOKEN`), the shared concurrency group keeps one connection and at most one waiting run, and a hand-over never happens when a send is due within 6 minutes. If the chain breaks (GitHub outage, crash early in a run), the Watchdog restarts it when GitHub's timer next fires, and the 3-hour catch-up sends what was missed.
 
 ## Why the session lives on a branch
 
