@@ -94,6 +94,7 @@ export const DEFAULT_SETTINGS = {
     contacts: [], tags: [],
     alsoRecent: false,      // also people who texted you in the last 30 days (all / except only)
     maxPeople: 500,         // safety cap: very big status lists fail or look like spam
+    testWith: '',           // "Post test" also goes to this one contact (id); '' = only you
     // Special days (festivals, national & world days): an image card instead of the quote — see shared/specialdays.js
     special: {
       enabled: true,        // works whenever Auto status is ON

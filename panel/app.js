@@ -329,6 +329,7 @@ function showCard(id) {
   document.body.appendChild(ov);
   ov.querySelector('[data-close]').focus();
 }
+const testPerson = (a) => (a?.testWith ? contacts().find((c) => c && c.id === a.testWith && c.number && !c.example) || null : null);
 function renderStatus() {
   if (!D || D._id !== 'status') D = { ...clone(settings()), _kind: 'settings', _id: 'status' };
   const a = D.autoStatus;
@@ -367,7 +368,8 @@ function renderStatus() {
     <p class="hint">${audHint} WhatsApp doesn't give bots your phone's address book, so “contacts” means the people in the Contacts tab here. You always see your own status.</p>
   </div>
   <div class="card"><h2>🧪 Try it</h2>
-    <p class="muted small" style="margin-top:0">Posts the next status to <b>only you</b> (WhatsApp → Updates → My status). Delete it there afterwards if you like.</p>
+    <p class="muted small" style="margin-top:0">Posts the next status to <b>${testPerson(a) ? `you + ${esc(testPerson(a).name || 'your test person')}` : 'only you'}</b> (WhatsApp → Updates → My status). The bot then messages you whether WhatsApp <b>accepted</b> it. Delete it there afterwards if you like.</p>
+    <div class="field"><label for="stTestWith">Test also goes to</label><select id="stTestWith" data-f="autoStatus.testWith" data-rr="1"><option value="">Nobody else (only me)</option>${contacts().filter((c) => c && c.number && !c.example).map((c) => `<option value="${esc(c.id)}" ${a.testWith === c.id ? 'selected' : ''}>${esc(c.name || c.number)}</option>`).join('')}</select><p class="hint">Optional: pick one friend to check that others can see it too (also used by “Post test now” on special days).</p></div>
     <div class="btns"><button class="btn cy" data-act="st-test">Post test status now</button></div>
   </div>
   <div class="sticky-save"><button class="btn primary" data-act="st-save">Save auto status</button></div>`;
@@ -997,8 +999,8 @@ async function onClick(e) {
         if (as.mode === 'photo' && as.photoUrl && !/^https:\/\/\S+$/i.test(as.photoUrl)) throw new Error('The photo link must start with https://');
         if (as.enabled && as.audience === 'only' && !(as.contacts || []).length && !(as.tags || []).length) throw new Error('Pick who should see it, or choose All my contacts');
         await save('settings', strip(D));
-        if (a === 'st-test') { await api.dispatch({ action: 'test-send', target: '@status' }); toast('Test started ✓ — check WhatsApp → Updates → My status in 1–3 min', 'ok'); }
-        if (a === 'sd-test') { await api.dispatch({ action: 'test-send', target: `@special:${b.dataset.v}` }); toast(`Test started ✓ — the ${SPECIAL_BY_ID[b.dataset.v]?.name || 'special day'} card goes to only you. Check WhatsApp → Updates → My status in 1–3 min`, 'ok'); }
+        if (a === 'st-test') { await api.dispatch({ action: 'test-send', target: '@status' }); toast(`Test started ✓ — goes to ${testPerson(as) ? 'you + your test person' : 'only you'}. In 1–3 min the bot messages you whether WhatsApp accepted it`, 'ok'); }
+        if (a === 'sd-test') { await api.dispatch({ action: 'test-send', target: `@special:${b.dataset.v}` }); toast(`Test started ✓ — the ${SPECIAL_BY_ID[b.dataset.v]?.name || 'special day'} card goes to ${testPerson(as) ? 'you + your test person' : 'only you'}. In 1–3 min the bot messages you whether WhatsApp accepted it`, 'ok'); }
         rerender(); break;
       }
       case 'wk-test': await save('settings', strip(D)); await api.dispatch({ action: 'test-send', target: '@report' }); toast('Started ✓ — the report reaches your WhatsApp in 1–3 min', 'ok'); break;

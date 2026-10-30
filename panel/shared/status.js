@@ -5,7 +5,8 @@
 //   enabled, time: "08:00", days: [0..6] (all 7 = every day),
 //   mode: "quote" | "own" | "photo", aiFresh, texts: ["…"], photoUrl, photoCaption,
 //   color: "rotate" | "#RRGGBB", font: "rotate" | 0..10,
-//   audience: "all" | "only" | "except", contacts: [ids], tags: [tags], alsoRecent, maxPeople
+//   audience: "all" | "only" | "except", contacts: [ids], tags: [tags], alsoRecent, maxPeople,
+//   testWith: contact id — "Post test" also goes to this one person ('' = only you)
 // }
 import { QUOTES, nextQuoteIndex, formatQuote } from './quotes.js';
 import { normalizeNumber } from './defaults.js';
@@ -26,6 +27,7 @@ const picked = (cfg, c) => (cfg.contacts || []).includes(c.id) || (c.tags || [])
  * Who gets the status. Returns { numbers, jids, total, capped, nobody }.
  *  contacts = panel contacts; recent = { number: lastMessageMs } (people who texted you);
  *  owner = your own number (or [your number, the bot's number]) — always included first, so you see it too.
+ *  testOnly = only you (+ the one test person in cfg.testWith, if picked).
  */
 export function statusAudience(cfg = {}, { contacts = [], recent = {}, owner = '', nowMs = Date.now(), testOnly = false } = {}) {
   const mine = (Array.isArray(owner) ? owner : [owner]).filter(Boolean);
@@ -34,6 +36,10 @@ export function statusAudience(cfg = {}, { contacts = [], recent = {}, owner = '
   const add = (n) => { const d = normalizeNumber(n); if (d.length >= 10 && !seen.has(d)) { seen.add(d); out.push(d); } };
   for (const n of mine) add(n); // you (and the bot's own number, if it is a different one)
   const selfCount = out.length;
+  if (testOnly && cfg.testWith) { // a test can also go to ONE person you pick (to check it shows for others too)
+    const t = contacts.find((c) => c && c.id === cfg.testWith && c.number && !c.example);
+    if (t) add(t.number);
+  }
   if (!testOnly) {
     const real = contacts.filter((c) => c && c.number && !c.example);
     const mode = cfg.audience || 'all';

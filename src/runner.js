@@ -10,6 +10,7 @@ import { MediaSaver } from './features/media.js';
 import { githubWatch, ntfyPoll, dispatchAlert } from './features/alerts.js';
 import { summaryText } from './features/summary.js';
 import { postStatus, weeklyReportText } from './features/autostatus.js';
+import { describeStatusResult } from './statuspost.js';
 import { statusAudience } from '../panel/shared/status.js';
 import { buildJobs, expandTargets, recipientId } from '../panel/shared/planner.js';
 import { renderTemplate, firstName, headerOn } from '../panel/shared/templates.js';
@@ -66,6 +67,16 @@ export async function run({ inbox = [] } = {}) {
     const { kind, ...rest } = opts;
     const r = await wa.send(jid, content, rest);
     if (r?.key?.id) state.memory.sentIds.push(r.key.id);
+    return r;
+  };
+  /** status posts: through wa.postStatus, which waits for WhatsApp's answer (src/statuspost.js) */
+  const sendStatus = async (content, o = {}) => {
+    const r = await wa.postStatus(content, { ...o, mem: state.memory });
+    if (r?.id) state.memory.sentIds.push(r.id);
+    const note = describeStatusResult(r);
+    if (r?.state === 'accepted') log.ok(`Status: ${note}${r.dropped ? ` — ${r.dropped} contact(s) left out (no WhatsApp id found)` : ''}`);
+    else log.warn(`Status: ${note}`);
+    state.status.statusPosts = [...(state.status.statusPosts || []), { at: Date.now(), state: r?.state, way: r?.variant || '', people: r?.people || 0, dropped: r?.dropped || 0, delivered: !!r?.delivered, tries: (r?.tries || []).map((t) => `${t.variant}:${t.result}${t.error ? `:${t.error}` : ''}`) }].slice(-20);
     return r;
   };
   const toOwner = async (text) => {
@@ -139,12 +150,22 @@ export async function run({ inbox = [] } = {}) {
       if (env.target === '@status' || env.target.startsWith('@special:')) {
         const owner = env.ownerNumber || wa.me();
         const specialId = env.target.startsWith('@special:') ? env.target.slice(9) : '';
-        const r = await postStatus({ send, data, state, ownerNumber: owner, botNumber: wa.me(), test: true, specialId });
+        const r = await postStatus({ send, sendStatus, data, state, ownerNumber: owner, botNumber: wa.me(), test: true, specialId });
         rec.sent++;
-        log.ok(`Test status posted (${r.label}) — only you can see it. Open WhatsApp → Updates → My status`);
-        const real = statusAudience(data.settings.autoStatus, { contacts: data.contacts, recent: state.memory.lastIn, owner: [owner, wa.me()] });
+        const cfgA = data.settings.autoStatus || {};
+        const helper = cfgA.testWith ? (data.contacts || []).find((c) => c && c.id === cfgA.testWith && c.number && !c.example) : null;
+        const seenBy = helper ? `you + ${helper.name || 'your test person'}` : 'only you';
+        const res = r.result || {};
+        log.ok(`Test status posted (${r.label}) — ${r.delivery}. Seen by ${helper ? 'you + 1 test person' : 'only you'}: WhatsApp → Updates → My status`);
+        const real = statusAudience(cfgA, { contacts: data.contacts, recent: state.memory.lastIn, owner: [owner, wa.me()] });
         const others = real.numbers.length - real.self;
-        await toOwner(`🧪 Test status posted (${r.label}). Only you can see it: WhatsApp → Updates → My status (delete it there if you like).\nThe real one will go to ${others} ${others === 1 ? 'person' : 'people'} + you${real.capped ? ` (capped at ${real.numbers.length}; ${real.total - real.self} picked)` : ''}.`).catch(() => {});
+        const realLine = `The real one will go to ${others} ${others === 1 ? 'person' : 'people'} + you${real.capped ? ` (capped at ${real.numbers.length}; ${real.total - real.self} picked)` : ''}.`;
+        const head = res.state === 'accepted'
+          ? `🧪 Test status: WhatsApp ACCEPTED it ✅${res.delivered ? ' and a phone confirmed it arrived 📱' : ''} (${r.label}).\nSeen by ${seenBy}: open WhatsApp → Updates → My status.\nNot there after a minute? Then WhatsApp took it but your phone didn't show it — screenshot this message.`
+          : res.state === 'unknown'
+            ? `🧪 Test status sent (${r.label}), but WhatsApp didn't answer in time, so I can't tell if it worked. Check WhatsApp → Updates → My status (seen by ${seenBy}).`
+            : `🧪 Test status sent (${r.label}) — ${r.delivery}. Seen by ${seenBy}: WhatsApp → Updates → My status.`;
+        await toOwner(`${head}\n${realLine}`).catch(() => {});
       } else {
         await toOwner(weeklyReportText(data, state));
         rec.sent++;
@@ -219,13 +240,13 @@ export async function run({ inbox = [] } = {}) {
       let extra = '';
       if (job.to.type === 'status') {
         // Auto status: posted to your WhatsApp status, seen by the people picked in the panel
-        const r = await postStatus({ send, data: d, state, ownerNumber: env.ownerNumber || wa.me(), botNumber: wa.me(), date: job.date, onlySpecial: job.dynamic === 'status-special' });
+        const r = await postStatus({ send, sendStatus, data: d, state, ownerNumber: env.ownerNumber || wa.me(), botNumber: wa.me(), date: job.date, onlySpecial: job.dynamic === 'status-special' });
         if (r.skipped) {
           ledger[job.key] = { t: Date.now(), s: 'skipped', k: job.kind, label: job.label, to: 'My status', err: r.skipped };
           log.info(`Auto status skipped: ${r.skipped}`);
           return;
         }
-        extra = ` (${r.label}, ${r.count} people${r.capped ? ', capped' : ''})`;
+        extra = ` (${r.label}, ${r.count} people${r.capped ? ', capped' : ''}) — ${r.delivery}`;
       } else {
         let jid;
         if (job.to.type === 'group') jid = job.to.jid;

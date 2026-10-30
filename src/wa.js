@@ -3,9 +3,11 @@ import fs from 'node:fs';
 import makeWASocket, {
   useMultiFileAuthState, DisconnectReason, Browsers, fetchLatestBaileysVersion,
   jidDecode, isJidGroup, isLidUser, jidNormalizedUser, makeCacheableSignalKeyStore,
+  generateWAMessage, generateMessageIDV2,
 } from 'baileys';
 import pino from 'pino';
 import { log } from './log.js';
+import { AckWatch, postStatusChecked, prepareStatusContent, statusRecipients, STATUS_JID } from './statuspost.js';
 
 const silent = pino({ level: process.env.VR_BAILEYS_LOG || 'silent' });
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -24,6 +26,7 @@ export class WA {
     this.pendingDone = false;
     this.attempts = 0;
     this.version = null;
+    this.watch = new AckWatch(); // the server's answers to our status posts (see statuspost.js)
   }
 
   async _version() {
@@ -59,6 +62,7 @@ export class WA {
           getMessage: async () => undefined,
         });
         this.sock = sock;
+        this.watch.attach(sock.ws);
         sock.ev.on('creds.update', saveCreds);
         sock.ev.on('messages.upsert', (m) => this.handlers.upsert?.(m));
         sock.ev.on('group-participants.update', (u) => this.handlers.participants?.(u));
@@ -120,6 +124,24 @@ export class WA {
     return this.sock.sendMessage(jid, content, opts);
   }
 
+  /**
+   * Post a WhatsApp status and wait for WhatsApp's answer (statuspost.js explains why).
+   * numbers = who should see it (you are always added) · look = { backgroundColor, font } for text
+   * mem = state.memory (remembers which way of sending WhatsApp accepted). Returns the postStatusChecked result.
+   */
+  async postStatus(content, { numbers = [], look = {}, mem = {} } = {}) {
+    await this.waitOpen();
+    const sock = this.sock;
+    const ready = await prepareStatusContent(content);
+    const build = async (c, lk) => (await generateWAMessage(STATUS_JID, c, {
+      userJid: sock.user.id, upload: sock.waUploadToServer, logger: silent,
+      ...(lk.backgroundColor ? { backgroundColor: lk.backgroundColor } : {}), ...(lk.font !== undefined ? { font: lk.font } : {}),
+    })).message;
+    const r = await postStatusChecked({ sock, watch: this.watch, build, newId: () => generateMessageIDV2(sock.user?.id), log }, ready, { numbers, look, remembered: mem.statusWay || '' });
+    if (r.state === 'accepted') mem.statusWay = r.variant;
+    return r;
+  }
+
   async exists(digits) {
     try {
       const [r] = await this.sock.onWhatsApp(numberJid(digits));
@@ -157,6 +179,11 @@ export class FakeWA {
   async waitOpen() {}
   async waitPending() { await sleep(100); }
   async send(jid, content, opts = {}) { const id = 'FAKE' + (this.sent.length + 1); this.sent.push({ jid, content, opts }); log.info(jid === 'status@broadcast' ? `(dry-run) would post a ${content.image ? 'photo' : 'text'} status for ${(opts.statusJidList || []).length} people (font ${opts.font ?? '-'}, colour ${opts.backgroundColor || '-'})` : `(dry-run) would send to ${isJidGroup(jid) ? 'a group' : 'a chat'}`); return { key: { id, remoteJid: jid, fromMe: true } }; }
+  async postStatus(content, { numbers = [], look = {} } = {}) {
+    const { jids } = statusRecipients({ me: this.sock.user, numbers, mode: 'pn' });
+    const r = await this.send(STATUS_JID, content, { ...look, statusJidList: jids });
+    return { state: 'accepted', variant: 'pn', label: 'dry run', id: r.key.id, people: jids.length, dropped: 0, delivered: false, tries: [{ variant: 'pn', result: 'accepted' }] };
+  }
   async exists(d) { return { exists: true, jid: numberJid(d) }; }
   async pnFor(jid, alt) { return jidNumber(alt || jid); }
   me() { return '919999999999'; }

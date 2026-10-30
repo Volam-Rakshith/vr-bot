@@ -376,6 +376,7 @@ test('dry run: auto status goes out on time to the picked people (+ you), test s
   const run3 = sh(process.execPath, ['src/index.js', 'run'], { cwd: work, env: { ...env, VR_ACTION: 'test-send', VR_TARGET: '@status' } });
   assert.match(run3.stdout, /would post a text status for 2 people/, run3.stdout); // only you (+ the bot's own number)
   assert.match(run3.stdout, /Test status posted/);
+  assert.match(run3.stdout, /WhatsApp accepted it/, 'says what WhatsApp answered, not just "posted"');
   // Special days → "Post test now" on the Diwali card: the real picture, only to you
   fs.rmSync(path.join(work, '.vr'), { recursive: true, force: true });
   const run3b = sh(process.execPath, ['src/index.js', 'run'], { cwd: work, env: { ...env, VR_ACTION: 'test-send', VR_TARGET: '@special:diwali' } });
