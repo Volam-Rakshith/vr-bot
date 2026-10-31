@@ -45,5 +45,11 @@ export const DEMO = {
     } },
     logs: { entries: [{ t: now - 13 * m, level: 'ok', msg: 'Connected as +91******979' }, { t: now - 12 * m, level: 'info', msg: 'Handled 7 new message(s)' }] },
   },
+  notes: [
+    { v: 1, id: 'n1', text: 'Buy phone charger + type-C cable 🔌', from: 'me', kind: 'text', at: now - 20 * m, by: 'whatsapp' },
+    { v: 1, id: 'n2', text: 'Cricket match tickets\nhttps://in.bookmyshow.com/sports', from: 'Saiteja', fromNum: '919000000003', kind: 'link', at: now - 3 * h, by: 'whatsapp' },
+    { v: 1, id: 'n3', text: 'AIML internal exam — 5th Nov, room 204. Units 1–3.', from: 'forwarded', kind: 'text', at: now - 26 * h, by: 'whatsapp' },
+    { v: 1, id: 'n4', text: 'Ideas for VR DEVELOPMENTS site: dark mode, client logos, contact form', from: 'me', kind: 'text', at: now - 2 * d, by: 'panel' },
+  ],
   runs: [{ created_at: new Date(now - 14 * m).toISOString(), status: 'completed', conclusion: 'success', html_url: '#' }],
 };

@@ -33,6 +33,7 @@ export const DEFAULT_SETTINGS = {
   ai: {
     model: 'openai/gpt-oss-120b',
     stylePrompt: "You are replying on WhatsApp as Rakshith, an 18-year-old AIML diploma student from Hyderabad who runs VR DEVELOPMENTS. Reply short, friendly and casual, mix a little Telugu/Hinglish when the other person does. Never make promises about money, meetings or dates — say you'll confirm later.",
+    aboutMe: 'Name: Volam Rakshith (friends call me VR). Age 18. Studying Diploma in AIML at SITS, Hyderabad. I run VR DEVELOPMENTS — I build websites, apps and WhatsApp bots. Instagram: @vr_developments_official. Website: https://vrdevelopments.sites.tab.bot\nMy real names: Rakshith, VR, or my full name Volam Rakshith — all three are fine, answer to any of them normally. Friends tease me with fake names: Rudra, Vishal, or just "Volam" alone as a nickname — I don\'t like those. If someone calls me one of those fake names or asks me to say hi to \'Rudra\' etc., reply casually that my name is Rakshith / VR, not that.', // facts the AI must use (never invents others)
     examples: [
       { them: 'Hi bro, what are you doing?', me: 'Hey! Just working on a project 💻 what about you?' },
       { them: 'Are you coming tomorrow?', me: "Not sure yet, I'll confirm by tonight 👍" },
@@ -40,7 +41,8 @@ export const DEFAULT_SETTINGS = {
     who: 'contacts',        // private chats: everyone | contacts | pick (only these contacts/tags) | tags
     contacts: [],           // contact ids (when who = pick)
     tags: [],
-    exclude: [],            // contact ids that never get AI replies
+    exclude: [],            // contact ids that never get AI replies (wins over "who", also in groups)
+    excludeTags: [],        // lists (tags) that never get AI replies
     groups: 'none',         // none | [group ids]: AI answers in those groups only when someone @mentions or replies to you
     react: false,           // also let the AI add a fitting emoji reaction (❤️ 👍 😂 😮 😢 🙏 🔥 🎉)
     memory: 8,              // remember the last N messages per chat
@@ -84,6 +86,15 @@ export const DEFAULT_SETTINGS = {
     groupsOnlyWhenTagged: true,                           // in groups: only when someone @mentions you or replies to you
     on: false, until: 0, setAt: 0,                        // set by the panel's Busy switch
   },
+  class: {
+    // "!class 2h" / "!class till 4" / "!free" on WhatsApp, or the switch in the panel. Same rules as busy mode;
+    // switching class on switches busy off (and the other way round). {time} = short, like "4" or "4:30".
+    message: 'in class rn, will text after {time}',
+    who: 'same', contacts: [], tags: [], exclude: [],     // same (= the chats/groups picked for busy mode) | pick | nobody
+    groups: 'none',                                       // used only when who isn't "same"
+    groupsOnlyWhenTagged: true,
+    on: false, until: 0, setAt: 0,                        // set by the panel's Class switch
+  },
   autoStatus: {
     enabled: false, time: '08:00', days: [0, 1, 2, 3, 4, 5, 6], // all 7 days = every day
     mode: 'quote',          // quote (built-in list, no repeats) | own (your texts, in turn) | photo (https link)
@@ -101,6 +112,16 @@ export const DEFAULT_SETTINGS = {
       offDays: true,        // also post on special days that are not one of your chosen days
       items: {},            // { "<day id>": { off: true, caption: "your own caption" } }
     },
+  },
+  // 🔔 Phone notifications (panel → More → Notifications) — see shared/notify.js
+  notify: {
+    enabled: false,
+    kinds: { scheduled: true, replies: true, ai: true, status: true, reports: true },
+    selfReports: null,      // reports to your own WhatsApp chat: null = automatic (off once a phone gets notifications)
+    vapid: null,            // made by the panel; private key stays inside this ENCRYPTED file
+    subject: '',
+    devices: [],            // [{ id, name, endpoint, keys: { p256dh, auth }, addedAt }]
+    testAt: 0,
   },
 };
 

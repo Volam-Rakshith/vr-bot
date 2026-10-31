@@ -31,7 +31,7 @@ export class GroupTools {
     const mentions = participantJids;
     const names = participantJids.map((j) => '@' + (jidNumber(j) || j.split('@')[0])).join(' ');
     const text = renderTemplate(cfg.welcome.message || 'Welcome {name} to {group}! 👋', { name: names, group: meta.subject }, groupJid);
-    await this.ctx.send(groupJid, { text, mentions }, { kind: 'group' });
+    await this.ctx.send(groupJid, { text, mentions }, { kind: 'group', cat: 'replies' });
     return 1;
   }
 
@@ -51,11 +51,11 @@ export class GroupTools {
     if (iAmAdmin && cfg.action !== 'warn') await this.wa.send(groupJid, { delete: msg.key }).catch(() => {});
     const tag = '@' + (jidNumber(senderJid) || senderJid.split('@')[0]);
     if (iAmAdmin && cfg.action === 'remove' && warns[k] >= limit) {
-      await this.ctx.send(groupJid, { text: `🚫 ${tag} removed after ${limit} link warnings.`, mentions: [senderJid] }, { kind: 'group' });
+      await this.ctx.send(groupJid, { text: `🚫 ${tag} removed after ${limit} link warnings.`, mentions: [senderJid] }, { kind: 'group', cat: 'replies' });
       await this.wa.sock.groupParticipantsUpdate(groupJid, [senderJid], 'remove').catch(() => {});
       warns[k] = 0;
     } else {
-      await this.ctx.send(groupJid, { text: `⚠️ ${tag} links are not allowed here (warning ${warns[k]}/${limit}).`, mentions: [senderJid] }, { kind: 'group' });
+      await this.ctx.send(groupJid, { text: `⚠️ ${tag} links are not allowed here (warning ${warns[k]}/${limit}).`, mentions: [senderJid] }, { kind: 'group', cat: 'replies' });
     }
     return true;
   }
@@ -66,7 +66,7 @@ export class GroupTools {
     if (!isOwner && cfg.tagallAdminsOnly !== false && !this.isAdmin(meta, senderJid)) return 'Only group admins can use !tagall.';
     const ids = meta.participants.map((p) => p.id);
     const tags = ids.map((j) => '@' + (jidNumber(j) || j.split('@')[0])).join(' ');
-    await this.ctx.send(groupJid, { text: `📢 ${arg || 'Attention everyone!'}\n\n${tags}`, mentions: ids }, { kind: 'group' });
+    await this.ctx.send(groupJid, { text: `📢 ${arg || 'Attention everyone!'}\n\n${tags}`, mentions: ids }, { kind: 'group', cat: 'replies' });
     return null;
   }
 

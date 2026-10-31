@@ -1,7 +1,7 @@
 // VR Bot control panel — © VR DEVELOPMENTS · "Turning Ideas Into Innovation"
 // Static app: talks straight to the GitHub API with YOUR token (kept only on this phone).
 // All private files are encrypted/decrypted here in the browser with your panel password.
-import { encryptJSON, openData, makeLock, checkLock, isEnvelope, decryptBytes, decryptJSON, b64decode, b64encode } from './shared/crypto.js';
+import { encryptJSON, encryptBytes, openData, makeLock, checkLock, isEnvelope, decryptBytes, decryptJSON, b64decode, b64encode } from './shared/crypto.js';
 import { withDefaults, normalizeNumber } from './shared/defaults.js';
 import { describe, nextOccurrence } from './shared/scheduler.js';
 import { buildJobs, expandTargets } from './shared/planner.js';
@@ -10,8 +10,12 @@ import { mergedFestivals, upcomingFestivals, festivalDate } from './shared/festi
 import { localDate, localTime, prettyDate, pretty12, WEEKDAYS, WEEKDAYS_FULL, MONTHS, isValidTime, isValidDate, zonedToUtc } from './shared/time.js';
 import { matchText, ruleApplies, REACTIONS } from './shared/rules.js';
 import { QUOTES, formatQuote } from './shared/quotes.js';
-import { statusAudience, STATUS_COLORS, STATUS_FONTS } from './shared/status.js';
-import { busyNow, busyText, busyTimeText } from './shared/busy.js';
+import { statusAudience, statusAudienceNames, STATUS_COLORS, STATUS_FONTS } from './shared/status.js';
+import { NOTIFY_KINDS, CAT_ICON, CAT_LABEL, epKey, deviceDead, pushReady, selfReportsOn, sentList } from './shared/notify.js';
+import { busyNow, modeNow, busyText, busyTimeText, modeScopeCfg, MODES } from './shared/busy.js';
+import { VOICE_BRANCH, VOICE_DIR, VOICE_LIMITS, clipPaths, clipIdFromPath, newClipId, cleanName, nameKey, findClip, voicePlan, ruleCooldown, fmtSecs, fmtSize } from './shared/voice.js';
+import { sniffAudio, isOggOpus, readOgg, webmToOgg, encodeToOgg, waveformOf } from './shared/ogg.js';
+import { NOTES_BRANCH, NOTES_DIR, NOTES_LIMITS, notePath, noteIdFromPath, newNoteId, cleanNoteText, sortNotes, searchNotes, linksIn, linkParts, notePreview } from './shared/notes.js';
 import { SPECIAL_DAYS, SPECIAL_BY_ID, upcomingSpecials, specialConfig, specialFor, cardUrl } from './shared/specialdays.js';
 
 const FILES = ['settings', 'contacts', 'schedules', 'templates', 'festivals', 'rules', 'groups'];
@@ -25,7 +29,7 @@ const view = () => $('#view');
 const S = {
   cfg: JSON.parse(localStorage.getItem('vrbot.cfg') || 'null'),
   pass: sessionStorage.getItem('vrbot.pass') || localStorage.getItem('vrbot.pass') || '',
-  demo: false, files: {}, state: { status: null, sentlog: null, logs: null }, runs: [], loaded: false, hasLock: false,
+  demo: false, files: {}, state: { status: null, sentlog: null, logs: null, outbox: null }, runs: [], loaded: false, hasLock: false,
 };
 let D = null; // the draft object of the open editor
 
@@ -121,7 +125,7 @@ async function loadAll() {
     const m = await api.readData(n);
     S.files[n] = m ? { data: await openData(m.data, S.pass), sha: m.sha, encrypted: isEnvelope(m.data) } : { data: {}, sha: null, encrypted: false };
   }));
-  await Promise.all(['status', 'sentlog', 'logs'].map(async (n) => { try { S.state[n] = await api.readState(n); } catch (e) { if (e.code === 'BAD_PASSPHRASE') throw e; S.state[n] = null; } }));
+  await Promise.all(['status', 'sentlog', 'logs', 'outbox'].map(async (n) => { try { S.state[n] = await api.readState(n); } catch (e) { if (e.code === 'BAD_PASSPHRASE') throw e; S.state[n] = null; } }));
   try { S.runs = await api.runs(); } catch { S.runs = []; }
   S.loaded = true;
 }
@@ -218,7 +222,18 @@ function peopleChips(base) {
   const n = (o.contacts || []).length + (o.tags || []).length;
   if (!cs.length && !ts.length) return '<p class="hint">Add people in Contacts first, then pick them here.</p>';
   return `${cs.length ? chipList(p('contacts'), cs, o.contacts || []) : ''}${ts.length ? chipList(p('tags'), ts, o.tags || []) : ''}
-    <p class="hint">${n ? `${n} picked. Tap again to remove.` : '⚠️ Nobody picked yet, so it won’t act for anyone. Tap names or lists above.'}</p>`;
+    <p class="hint">${n ? `${n} picked. Tap again to remove. Numbers not saved in Contacts never get it.` : '<b>⚠️ Nobody picked yet, so it won’t reply to anyone.</b> Tap names or lists above, or choose Everyone.'}</p>`;
+}
+/** "Never reply to these people": contacts + tags that a feature must skip. base = path holding .exclude / .excludeTags ('' = the rule being edited). */
+function excludeChips(base, what = 'it') {
+  const o = base ? getPath(D, base) || {} : D;
+  const p = (k) => (base ? `${base}.${k}` : k);
+  const ids = new Set(contacts().map((c) => c.id));
+  const cs = contacts().map((c) => [c.id, `🚫 ${c.name}`]), ts = allTags().map((t) => [t, `🚫 🏷️ ${t}`]);
+  const n = (o.exclude || []).filter((id) => ids.has(id)).length + (o.excludeTags || []).length;
+  if (!cs.length && !ts.length) return '<p class="hint">Save people in Contacts first, then you can block them here.</p>';
+  return `${cs.length ? chipList(p('exclude'), cs, o.exclude || []) : ''}${ts.length ? chipList(p('excludeTags'), ts, o.excludeTags || []) : ''}
+    <p class="hint">${n ? `<b>${n} blocked</b> — ${esc(what)} never replies to them, even if they are picked above (groups too). ` : 'Nobody blocked. '}Works for people saved in Contacts (matched by their WhatsApp number). Someone not saved can't be blocked here — save them as a contact first.</p>`;
 }
 /** Group selector. value: "all" | "none" | [group ids]. */
 function groupScope(path, value, opts, hints = {}) {
@@ -237,30 +252,47 @@ function groupScope(path, value, opts, hints = {}) {
 const whoMode = (v) => (v === 'tags' ? 'pick' : v); // old "Some tags" = "Only these…" with only tags picked
 const wdPick = (field, sel) => `<div class="chips">${WEEKDAYS.map((w, i) => `<button type="button" class="chip ${(sel || []).includes(i) ? 'on' : ''}" data-act="wd" data-field="${field}" data-i="${i}" aria-pressed="${(sel || []).includes(i)}">${w}</button>`).join('')}</div>`;
 
-/* ---- 🔕 Busy mode card (Replies screen). Saves right away when switched on/off. ---- */
-let busyDur = '60';
-function busyCard(s) {
-  const b = busyNow(s, status(), Date.now());
-  const bs = s.busy || {};
-  const picked = (bs.who === 'pick' ? (bs.contacts || []).length + (bs.tags || []).length : 0) + (Array.isArray(bs.groups) ? bs.groups.length : 0);
+/* ---- 🔕 Busy mode & 🎓 Class mode cards (Replies screen). Save right away when switched on/off. ---- */
+const modeDur = { busy: '60', class: '60' };
+function busyCard(s) { return modeCard(s, 'busy') + modeCard(s, 'class'); }
+function modeCard(s, mode) {
+  const M = MODES[mode], w = mode, now = Date.now();
+  const b = busyNow(s, status(), now, mode);
+  const other = modeNow(s, status(), now);
+  const bs = s[mode] || {};
+  const same = mode === 'class' && (!bs.who || bs.who === 'same');
+  const sc = modeScopeCfg(s, mode);
+  const picked = (sc.who === 'pick' ? (sc.contacts || []).length + (sc.tags || []).length : 0) + (Array.isArray(sc.groups) ? sc.groups.length : 0);
   const head = b.active
-    ? `<div class="banner ok"><span>🔕</span><div><b>Busy until ${esc(busyTimeText(b.until, Date.now(), tz()))}</b>${b.source === 'whatsapp' ? 'Switched on from WhatsApp (!busy). ' : ''}Turns off by itself and tells you on WhatsApp.</div></div>`
+    ? `<div class="banner ok"><span>${M.icon}</span><div><b>${M.name} until ${esc(busyTimeText(b.until, now, tz()))}</b>${b.source === 'whatsapp' ? `Switched on from WhatsApp (!${w}). ` : ''}Turns off by itself and tells you on WhatsApp.</div></div>`
     : '';
-  const durs = [['30', '30 min'], ['60', '1 hour'], ['120', '2 hours'], ['180', '3 hours'], ['until', 'Until…']];
-  return `<div class="card" id="busyCard"><h2>🔕 Busy mode ${b.active ? '<span class="pill ok tiny">ON</span>' : ''}</h2>
+  const durs = mode === 'class'
+    ? [['60', '1 hour'], ['90', '1.5 hours'], ['120', '2 hours'], ['180', '3 hours'], ['until', 'Until…']]
+    : [['30', '30 min'], ['60', '1 hour'], ['120', '2 hours'], ['180', '3 hours'], ['until', 'Until…']];
+  const dur = modeDur[mode];
+  const intro = mode === 'class'
+    ? `While you're in class, the bot replies <b>once</b> per chat with your class message. ${same ? 'It uses the same chats and groups as busy mode.' : 'Only in the chats and groups you pick below.'} Only one of busy/class is on at a time.`
+    : 'While you\'re busy, the bot replies <b>once</b> per chat with your busy message, only in the chats and groups you pick below. Stickers and GIFs don\'t trigger it.';
+  const pickHint = same ? 'Nobody is picked in busy mode yet, so class mode won’t reply to anyone. Pick chats in Busy mode above (or “Only these…” here), then Save replies.' : `Nobody is picked yet, so ${w} mode won’t reply to anyone. Choose people or groups below, then Save replies.`;
+  const swapNote = !b.active && other.active ? `<p class="hint">${MODES[other.mode].icon} ${MODES[other.mode].name} mode is on now. Turning ${w} mode on switches it off.</p>` : '';
+  return `<div class="card" id="${w}Card"><h2>${M.icon} ${M.name} mode ${b.active ? '<span class="pill ok tiny">ON</span>' : ''}</h2>
     ${head}
-    <p class="muted small" style="margin-top:0">While you're busy, the bot replies <b>once</b> per chat with your busy message, only in the chats and groups you pick below. Stickers and GIFs don't trigger it.</p>
-    ${picked ? '' : '<div class="banner warn"><span>👇</span><div><b>Pick chats first</b>Nobody is picked yet, so busy mode won’t reply to anyone. Choose people or groups below, then Save replies.</div></div>'}
-    ${b.active ? `<div class="btns"><button class="btn" data-act="busy-off">☀️ I'm free — turn off</button></div>` : `
-    <div class="field"><span class="lbl">For how long</span><div class="seg" role="group">${durs.map(([v, l]) => `<button type="button" data-act="busy-dur" data-v="${v}" aria-pressed="${busyDur === v}">${l}</button>`).join('')}</div>
-      ${busyDur === 'until' ? `<input id="busyUntil" type="time" aria-label="Busy until" style="margin-top:8px" value="${esc(localTime(Date.now() + 2 * 3600000, tz()).slice(0, 3) + '00')}">` : ''}</div>
-    <div class="btns"><button class="btn primary" data-act="busy-on">🔕 Turn on busy mode</button></div>`}
-    <div class="field" style="margin-top:12px"><label for="fBm">Busy message</label><textarea id="fBm" data-f="busy.message">${esc(bs.message)}</textarea>
-      <p class="hint">{time} becomes the time you're back, e.g. “${esc(busyText(bs.message, Date.now() + 2 * 3600000, Date.now(), tz()))}”</p></div>
-    <div class="field"><span class="lbl">Private chats that get it</span>${seg('busy.who', [['nobody', 'Nobody'], ['pick', 'Only these…']], bs.who === 'pick' ? 'pick' : 'nobody')}${bs.who === 'pick' ? peopleChips('busy') : ''}</div>
-    <div class="field"><span class="lbl">Groups that get it</span>${groupScope('busy.groups', bs.groups, [['none', 'No groups'], ['pick', 'Only these groups']], { none: 'Never in groups.' })}</div>
-    ${Array.isArray(bs.groups) ? sw('In groups, only when someone tags me', 'Replies only when someone @mentions you or replies to your message (recommended)', 'data-f="busy.groupsOnlyWhenTagged"', bs.groupsOnlyWhenTagged !== false) : ''}
-    <p class="hint">From WhatsApp (message yourself): <span class="mono">!busy 2h</span> · <span class="mono">!busy 30m</span> · <span class="mono">!busy until 5pm</span> · <span class="mono">!busy off</span></p>
+    <p class="muted small" style="margin-top:0">${intro}</p>
+    ${picked ? '' : `<div class="banner warn"><span>👇</span><div><b>Pick chats first</b>${pickHint}</div></div>`}
+    ${b.active ? `<div class="btns"><button class="btn" data-act="busy-off" data-mode="${w}">☀️ I'm free — turn off</button></div>` : `
+    <div class="field"><span class="lbl">For how long</span><div class="seg" role="group">${durs.map(([v, l]) => `<button type="button" data-act="busy-dur" data-mode="${w}" data-v="${v}" aria-pressed="${dur === v}">${l}</button>`).join('')}</div>
+      ${dur === 'until' ? `<input id="${w}Until" type="time" aria-label="${M.name} until" style="margin-top:8px" value="${esc(localTime(now + 2 * 3600000, tz()).slice(0, 3) + '00')}">` : ''}</div>
+    ${swapNote}
+    <div class="btns"><button class="btn primary" data-act="busy-on" data-mode="${w}">${M.icon} Turn on ${w} mode</button></div>`}
+    <div class="field" style="margin-top:12px"><label for="f${w}m">${M.name} message</label><textarea id="f${w}m" data-f="${w}.message">${esc(bs.message)}</textarea>
+      <p class="hint">{time} becomes the time you're ${mode === 'class' ? 'free' : 'back'}, e.g. “${esc(busyText(bs.message, now + 2 * 3600000, now, tz(), mode))}”</p></div>
+    ${mode === 'class' ? `<div class="field"><span class="lbl">Chats that get it</span>${seg('class.who', [['same', 'Same as busy mode'], ['pick', 'Only these…'], ['nobody', 'Nobody']], same ? 'same' : bs.who === 'pick' ? 'pick' : 'nobody')}${bs.who === 'pick' ? peopleChips('class') : ''}</div>` : `
+    <div class="field"><span class="lbl">Private chats that get it</span>${seg('busy.who', [['nobody', 'Nobody'], ['pick', 'Only these…']], bs.who === 'pick' ? 'pick' : 'nobody')}${bs.who === 'pick' ? peopleChips('busy') : ''}</div>`}
+    ${same || (mode === 'class' && bs.who === 'nobody') ? '' : `<div class="field"><span class="lbl">Groups that get it</span>${groupScope(`${w}.groups`, bs.groups, [['none', 'No groups'], ['pick', 'Only these groups']], { none: 'Never in groups.' })}</div>
+    ${Array.isArray(bs.groups) ? sw('In groups, only when someone tags me', 'Replies only when someone @mentions you or replies to your message (recommended)', `data-f="${w}.groupsOnlyWhenTagged"`, bs.groupsOnlyWhenTagged !== false) : ''}`}
+    <p class="hint">From WhatsApp (message yourself): ${mode === 'class'
+      ? '<span class="mono">!class 2h</span> · <span class="mono">!class till 4</span> · <span class="mono">!class till 4:30pm</span> · <span class="mono">!class</span> (1 hour) · <span class="mono">!free</span>'
+      : '<span class="mono">!busy 2h</span> · <span class="mono">!busy 30m</span> · <span class="mono">!busy until 5pm</span> · <span class="mono">!busy off</span> or <span class="mono">!free</span>'}</p>
   </div>`;
 }
 
@@ -330,13 +362,25 @@ function showCard(id) {
   ov.querySelector('[data-close]').focus();
 }
 const testPerson = (a) => (a?.testWith ? contacts().find((c) => c && c.id === a.testWith && c.number && !c.example) || null : null);
+/** Auto status → "Who sees it": the actual names (Contacts), + the people who texted lately (known only to the bot). */
+function audienceNamesHtml(a) {
+  const r = statusAudienceNames(a, { contacts: contacts(), owner: '0000000000' });
+  const last = [...(S.state.outbox?.entries || [])].reverse().find((e) => e.cat === 'status' && (e.people || []).length);
+  const chips = r.people.length
+    ? `<div class="chips" style="margin-top:6px">${r.people.slice(0, 200).map((x) => `<span class="chip static">${esc(x.name)}</span>`).join('')}${r.people.length > 200 ? `<span class="muted small">+${r.people.length - 200} more</span>` : ''}</div>`
+    : '<p class="hint">Nobody from Contacts.</p>';
+  return `<details class="sent-who" style="margin-top:10px"><summary>👀 See who (${r.people.length} from Contacts${r.capped ? ', capped' : ''})</summary>${chips}
+    ${r.recentIncluded ? '<p class="hint">+ people who texted you in the last 30 days (only the bot knows them; the 📤 Sent log shows exactly who after each post).</p>' : ''}</details>
+    ${last ? `<p class="hint">Last status (${esc(whenText(last.t))}) went to <b>${last.count ?? last.people.length}</b> people. <a href="#/sent">See who in the Sent log ›</a></p>` : ''}`;
+}
+
 function renderStatus() {
   if (!D || D._id !== 'status') D = { ...clone(settings()), _kind: 'settings', _id: 'status' };
   const a = D.autoStatus;
   const days = (a.days || []).map(Number);
   const everyDay = days.length === 7;
   const aud = statusAudience(a, { contacts: contacts(), owner: '0000000000' });
-  const others = aud.numbers.length - 1;
+  const others = aud.numbers.length - aud.self; // (the placeholder owner number is not counted, so no "- 1" here)
   const next = buildJobs({ ...planData(), settings: withDefaults(strip(D)) }, Date.now(), Date.now() + 8 * 86400000).find((j) => j.kind === 'status');
   const audHint = a.audience === 'only'
     ? (others ? `Goes to <b>${others}</b> ${others === 1 ? 'person' : 'people'} + you.` : '⚠️ Nobody picked yet. Tap people or lists above.')
@@ -365,6 +409,7 @@ function renderStatus() {
     ${seg('autoStatus.audience', [['all', 'All my contacts'], ['only', 'Only these…'], ['except', 'All except…']], a.audience || 'all')}
     ${a.audience === 'only' || a.audience === 'except' ? `<p class="hint" style="margin-top:8px">${a.audience === 'only' ? 'Tap who should see it:' : 'Tap who should NOT see it:'}</p>${peopleChips('autoStatus')}` : ''}
     ${a.audience !== 'only' ? sw('Also people who texted me lately', 'Anyone who messaged you in the last 30 days, even if they are not in Contacts', 'data-f="autoStatus.alsoRecent" data-rr="1"', a.alsoRecent) : ''}
+    ${audienceNamesHtml(a)}
     <p class="hint">${audHint} WhatsApp doesn't give bots your phone's address book, so “contacts” means the people in the Contacts tab here. You always see your own status.</p>
   </div>
   <div class="card"><h2>🧪 Try it</h2>
@@ -414,7 +459,8 @@ function topStatus() {
   const st = status();
   const s = st.session?.status;
   const pill = S.demo ? '<span class="pill vi">DEMO</span>' : s === 'ok' ? '<span class="pill ok"><span class="dot"></span>Linked</span>' : s === 'logged_out' ? '<span class="pill bad"><span class="dot"></span>Logged out</span>' : '<span class="pill warn"><span class="dot"></span>Not linked</span>';
-  const busy = busyNow(settings(), st, Date.now()).active ? '<span class="pill cy" title="Busy mode is on" aria-label="Busy mode is on">🔕</span>' : '';
+  const m = modeNow(settings(), st, Date.now());
+  const busy = m.active ? `<span class="pill cy" title="${MODES[m.mode].name} mode is on" aria-label="${MODES[m.mode].name} mode is on">${MODES[m.mode].icon}</span>` : '';
   $('#topRight').innerHTML = (settings().paused || st.pausedByOwner ? '<span class="pill warn">⏸ Paused</span>' : '') + busy + pill;
 }
 
@@ -445,7 +491,7 @@ function renderHome() {
       <div class="stat"><div class="k">❌ Failures</div><div class="v ${fails.length ? 'bad' : 'ok'}">${fails.length}</div><div class="s">last 7 days</div></div>
     </div>
     <div class="card glow"><h2>⏰ Next sends <span class="count">${jobs.length} in 7 days</span></h2>
-      <div class="list">${jobs.slice(0, 8).map((j) => `<div class="row"><div class="ic">${{ birthday: '🎂', festival: '🪔', group: '👥', broadcast: '📣', summary: '📊', alert: '🔔', followup: '↩️', status: '📸' }[j.kind] || '💬'}</div><div class="main"><div class="t">${esc(j.label)}</div><div class="d">→ ${esc(j.to.type === 'group' ? j.to.name : j.to.owner ? 'you' : j.to.name || j.to.number)}${j.header ? ' · 🤖 header' : ''}</div></div><div class="r stack">${esc(whenText(j.at).split(' · ')[0])}<b>${esc(pretty12(localTime(j.at, tz())))}</b></div></div>`).join('') || '<p class="empty">Nothing scheduled. Tap Schedules → ＋ to add one.</p>'}</div>
+      <div class="list">${jobs.slice(0, 8).map((j) => `<div class="row"><div class="ic">${{ birthday: '🎂', festival: '🪔', group: '👥', broadcast: '📣', summary: '📊', alert: '🔔', followup: '↩️', status: '📸' }[j.kind] || '💬'}</div><div class="main"><div class="t">${j.voice ? '🎙️ ' : ''}${esc(j.label)}</div><div class="d">→ ${esc(j.to.type === 'group' ? j.to.name : j.to.owner ? 'you' : j.to.name || j.to.number)}${j.header ? ' · 🤖 header' : ''}</div></div><div class="r stack">${esc(whenText(j.at).split(' · ')[0])}<b>${esc(pretty12(localTime(j.at, tz())))}</b></div></div>`).join('') || '<p class="empty">Nothing scheduled. Tap Schedules → ＋ to add one.</p>'}</div>
     </div>
     ${fails.length ? `<div class="card"><h2>❌ Failures</h2><div class="list">${fails.slice(0, 5).map((f) => `<div class="row"><div class="ic">⚠️</div><div class="main"><div class="t">${esc(f.label || f.k)}</div><div class="d">${esc(f.err || '')}</div></div><div class="r">${esc(ago(f.t))}</div></div>`).join('')}</div></div>` : ''}
     <div class="card"><h2>🪔 Upcoming festivals <a class="count" href="#/festivals">manage</a></h2><div class="list">${fests.map((f) => `<a class="row" href="#/festival/${esc(f.id)}"><div class="ic">${esc(f.emoji || '🎉')}</div><div class="main"><div class="t">${esc(f.name)}</div><div class="d">${f.enabled && (f.to || []).length ? `✅ wishes on · ${esc(pretty12(f.time || festCfg().defaultTime || '00:00'))}` : 'off — tap to set up'}${f.lunar ? ' · date varies yearly' : ''}</div></div><div class="r when">${esc(prettyDate(f.date).replace(/^\w+, /, ''))}</div></a>`).join('')}</div></div>
@@ -463,7 +509,7 @@ function renderSchedules() {
     <div class="card"><div class="list">${list.map((x) => {
       const n = nextOccurrence(x, now, tz());
       const icon = (x.to || []).some((t) => t.type === 'group') ? '👥' : (x.to || []).some((t) => t.type === 'tag') || (x.to || []).length > 1 ? '📣' : '💬';
-      return `<div class="row"><a class="ic" href="#/schedule/${esc(x.id)}" aria-hidden="true" tabindex="-1" style="text-decoration:none">${icon}</a><a class="main" href="#/schedule/${esc(x.id)}" style="text-decoration:none;color:inherit"><div class="t">${esc(x.name || 'Untitled')} ${exampleBadge(x)}</div><div class="d">${esc(describe(x))}</div><div class="d">${(x.to || []).map((t) => esc(targetLabel(t))).join(', ')}${n && x.enabled !== false ? ` · next <span class="when">${esc(whenText(n.at))}</span>` : x.enabled === false ? ' · <span class="warn">paused</span>' : ''}</div></a>${toggle(`data-act="sch-enable" data-id="${esc(x.id)}"`, x.enabled !== false, `Enable ${x.name}`)}</div>`;
+      return `<div class="row"><a class="ic" href="#/schedule/${esc(x.id)}" aria-hidden="true" tabindex="-1" style="text-decoration:none">${icon}</a><a class="main" href="#/schedule/${esc(x.id)}" style="text-decoration:none;color:inherit"><div class="t">${voicePlan(x).voice ? '🎙️ ' : ''}${esc(x.name || 'Untitled')} ${exampleBadge(x)}</div><div class="d">${esc(describe(x))}</div><div class="d">${(x.to || []).map((t) => esc(targetLabel(t))).join(', ')}${n && x.enabled !== false ? ` · next <span class="when">${esc(whenText(n.at))}</span>` : x.enabled === false ? ' · <span class="warn">paused</span>' : ''}</div></a>${toggle(`data-act="sch-enable" data-id="${esc(x.id)}"`, x.enabled !== false, `Enable ${x.name}`)}</div>`;
     }).join('') || '<p class="empty">No schedules yet. Tap ＋ to create your first one.</p>'}</div></div>
     <a class="fab" href="#/schedule/new" aria-label="New schedule">＋</a>`;
 }
@@ -472,7 +518,7 @@ const NEW_SCHEDULE = () => ({ id: uid('s'), name: '', enabled: true, to: [], mes
 
 function renderScheduleEditor(id) {
   const existing = schedules().find((x) => x.id === id);
-  if (!D || D._id !== id) D = { ...(existing ? clone(existing) : NEW_SCHEDULE()), _id: id, _kind: 'schedule' };
+  if (!D || D._id !== id) { D = { ...(existing ? clone(existing) : NEW_SCHEDULE()), _id: id, _kind: 'schedule' }; D._vmode = voicePlan(D).voice ? D.voice.mode : 'text'; REC.open = false; }
   const r = D.repeat || { type: 'daily' };
   const tplOpts = templates().map((t) => `<option value="${esc(t.id)}" ${D.templateId === t.id ? 'selected' : ''}>${esc(t.name)}</option>`).join('');
   const wdChips = (field, sel) => `<div class="chips">${WEEKDAYS.map((w, i) => `<button type="button" class="chip ${(sel || []).includes(i) ? 'on' : ''}" data-act="wd" data-field="${field}" data-i="${i}" aria-pressed="${(sel || []).includes(i)}">${w}</button>`).join('')}</div>`;
@@ -490,9 +536,13 @@ function renderScheduleEditor(id) {
     <div class="field"><span class="lbl">Send to</span>${targetPicker(D.to)}</div>
   </div>
   <div class="card">
-    <div class="field"><label for="fTpl">Template</label><select id="fTpl" data-f="templateId"><option value="">— Write my own message —</option>${tplOpts}</select></div>
+    ${voiceModeField('Send')}
+    ${voicePickerHtml()}
+    <div ${D._vmode === 'voice' ? 'hidden' : ''}>
+    <div class="field"><label for="fTpl">${D._vmode === 'voice+text' ? 'Text after the voice clip — template' : 'Template'}</label><select id="fTpl" data-f="templateId"><option value="">— Write my own message —</option>${tplOpts}</select></div>
     <div class="field" ${D.templateId ? 'hidden' : ''}><label for="fMsg">Message</label><textarea id="fMsg" data-f="message" placeholder="Good morning {first_name} ☀️">${esc(D.message)}</textarea>${placeholderChips('fMsg')}</div>
     <span class="lbl">Preview</span><div id="pv"></div>
+    </div>
   </div>
   <div class="card">
     <div class="grid2"><div class="field"><label for="fTime">Time (${esc(tz())})</label><input id="fTime" type="time" data-f="time" value="${esc(D.time)}" required></div>
@@ -594,7 +644,7 @@ function renderReplies() {
   <div class="card"><h2>⚡ Auto-reply rules <span class="count">${rules().length}</span></h2>
     ${sw('Auto-reply', 'Reply when a message matches a keyword', 'data-f="features.autoReply"', s.features.autoReply, delayedPill())}
     ${sw('Also respond to stickers & GIFs', 'Off = stickers, GIFs, reactions and deleted messages never trigger auto-replies, away, AI or busy replies (good for busy groups)', 'data-f="replies.stickers"', !!s.replies?.stickers)}
-    <div class="list">${rules().map((r) => `<a class="row" href="#/rule/${esc(r.id)}"><div class="ic">${r.enabled === false ? '⏸️' : '⚡'}</div><div class="main"><div class="t">${esc(r.match)}: “${esc(r.pattern)}”</div><div class="d">→ ${r.react ? esc(r.react) + ' ' : ''}${esc((Array.isArray(r.reply) ? r.reply[0] : r.reply) || (r.react ? 'reaction only' : ''))}</div></div><div class="r">${esc({ private: 'private', groups: 'groups', both: 'both' }[r.where || 'private'] || r.where)}${(r.groups || []).length && r.where !== 'private' ? ` · ${r.groups.length} grp` : ''}${(r.contacts || []).length + (r.tags || []).length && r.where !== 'groups' ? ' · picked' : ''}</div></a>`).join('') || '<p class="empty">No rules yet.</p>'}</div>
+    <div class="list">${rules().map((r) => `<a class="row" href="#/rule/${esc(r.id)}"><div class="ic">${r.enabled === false ? '⏸️' : '⚡'}</div><div class="main"><div class="t">${esc({ word: 'has', contains: 'contains', exact: 'is', startsWith: 'starts with', regex: 'regex' }[r.match || 'contains'] || r.match)}: “${esc(r.pattern)}”</div><div class="d">→ ${esc(ruleSummary(r))}</div></div><div class="r">${esc({ private: 'private', groups: 'groups', both: 'both' }[r.where || 'private'] || r.where)}${(r.groups || []).length && r.where !== 'private' ? ` · ${r.groups.length} grp` : ''}${r.where !== 'groups' ? ((r.contacts || []).length + (r.tags || []).length ? ' · picked' : r.people === 'pick' ? ' · ⚠️ nobody' : '') : ''}${(r.exclude || []).length + (r.excludeTags || []).length ? ` · 🚫 ${(r.exclude || []).length + (r.excludeTags || []).length}` : ''}</div></a>`).join('') || '<p class="empty">No rules yet.</p>'}</div>
     <div class="btns" style="margin-top:10px"><a class="btn sm cy" href="#/rule/new">＋ Add rule</a></div>
     <div class="field" style="margin-top:12px"><label for="ruleTest">Test a message</label><input id="ruleTest" type="text" placeholder="e.g. what's your price?"><p class="hint" id="ruleTestOut">Type to see which rule would answer.</p></div>
   </div>
@@ -608,11 +658,13 @@ function renderReplies() {
   </div>
   <div class="card"><h2>🧠 AI replies in your style</h2>
     ${sw('AI replies', 'Uses the free Groq API. Needs the GROQ_API_KEY secret (SETUP step 11).', 'data-f="features.ai"', s.features.ai, delayedPill())}
-    <div class="field" style="margin-top:10px"><label for="fSp">Your style (how should it talk?)</label><textarea id="fSp" data-f="ai.stylePrompt" style="min-height:120px">${esc(s.ai.stylePrompt)}</textarea></div>
+    <div class="field" style="margin-top:10px"><label for="fAbout">About you (facts the AI must use)</label><textarea id="fAbout" data-f="ai.aboutMe" style="min-height:110px" placeholder="Name: … Age: … College: … Business: …">${esc(s.ai.aboutMe ?? '')}</textarea><p class="hint">Your real name, age, college, business, links. The AI only uses these and never makes up a name or details. Asked something not here, it says it will tell them later.</p></div>
+    <div class="field"><label for="fSp">Your style (how should it talk?)</label><textarea id="fSp" data-f="ai.stylePrompt" style="min-height:120px">${esc(s.ai.stylePrompt)}</textarea></div>
     <div class="field"><span class="lbl">Example chats (teach it how you reply)</span>
       ${(s.ai.examples || []).map((ex, i) => `<div class="card" style="padding:10px;margin-bottom:8px"><input type="text" aria-label="They say" data-f="ai.examples.${i}.them" value="${esc(ex.them)}" placeholder="They say…"><input type="text" aria-label="You reply" style="margin-top:6px" data-f="ai.examples.${i}.me" value="${esc(ex.me)}" placeholder="You reply…"><button class="btn sm ghost" data-act="ex-rm" data-i="${i}" style="margin-top:6px">Remove</button></div>`).join('')}
       <button class="btn sm" data-act="ex-add">＋ Add example</button></div>
     <div class="field"><span class="lbl">Who gets AI replies (private chats)</span>${seg('ai.who', [['contacts', 'My contacts'], ['pick', 'Only these…'], ['everyone', 'Everyone']], whoMode(s.ai.who))}${whoMode(s.ai.who) === 'pick' ? peopleChips('ai') : ''}</div>
+    <div class="field"><span class="lbl">🚫 Never send AI replies to these people</span>${excludeChips('ai', 'the AI')}</div>
     <div class="field"><span class="lbl">AI in groups</span>${groupScope('ai.groups', s.ai.groups, [['none', 'No groups'], ['pick', 'Only these groups']], { none: 'The AI never answers in groups.', pick: 'It answers there only when someone @mentions you or replies to your message.' })}</div>
     ${sw('Also react with an emoji', 'The AI picks one fitting reaction (❤️ 👍 😂 😮 😢 🙏 🔥 🎉) or none, on the same messages it answers', 'data-f="ai.react"', s.ai.react)}
     <div class="grid2"><div class="field"><label for="fAiM">Memory (messages)</label><input id="fAiM" type="number" min="0" max="20" data-f="ai.memory" data-type="num" value="${esc(s.ai.memory)}"></div><div class="field"><label for="fAiC">Max replies / chat / day</label><input id="fAiC" type="number" min="1" data-f="ai.maxPerChatPerDay" data-type="num" value="${esc(s.ai.maxPerChatPerDay)}"></div></div>
@@ -621,32 +673,37 @@ function renderReplies() {
   <div class="sticky-save"><button class="btn primary" data-act="settings-save">Save replies</button></div>`;
   $('#ruleTest').addEventListener('input', (e) => {
     const t = e.target.value; const hit = rules().find((r) => matchText(r, t) && ruleApplies(r, {}));
-    $('#ruleTestOut').innerHTML = !t ? 'Type to see which rule would answer.' : hit ? `✅ Rule “${esc(hit.pattern)}” replies: <b>${esc(Array.isArray(hit.reply) ? hit.reply[0] : hit.reply)}</b>` : `No rule matches${s.features.ai ? ' → AI would reply' : ''}.`;
+    const vp = hit ? voicePlan(hit) : null;
+    $('#ruleTestOut').innerHTML = !t ? 'Type to see which rule would answer.' : hit ? `✅ Rule “${esc(hit.pattern)}” replies: <b>${vp.voice ? `🎙️ voice clip “${esc(hit.voice.name || '')}”${vp.text ? ' + ' : ''}` : ''}${vp.voice && !vp.text ? '' : esc(Array.isArray(hit.reply) ? hit.reply[0] : hit.reply)}</b>${vp.voice ? ' (AI stays quiet for this message)' : ''}` : `No rule matches${s.features.ai ? ' → AI would reply' : ''}.`;
   });
 }
 
 function renderRuleEditor(id) {
   const existing = rules().find((r) => r.id === id);
   if (!D || D._id !== id) {
-    D = { ...(existing ? clone(existing) : { id: uid('r'), enabled: true, match: 'contains', pattern: '', caseSensitive: false, reply: '', react: '', where: 'private', contacts: [], tags: [], groups: [], exclude: [], cooldownMinutes: 60 }), _id: id, _kind: 'rule' };
-    D._people = (D.contacts || []).length || (D.tags || []).length ? 'pick' : 'all';
+    D = { ...(existing ? clone(existing) : { id: uid('r'), enabled: true, match: 'word', pattern: '', caseSensitive: false, reply: '', react: '', where: 'private', contacts: [], tags: [], groups: [], exclude: [] }), _id: id, _kind: 'rule' };
+    D._vmode = voicePlan(D).voice ? D.voice.mode : 'text'; REC.open = false;
+    D._people = D.people === 'all' || D.people === 'pick' ? D.people : (D.contacts || []).length || (D.tags || []).length ? 'pick' : 'all';
     D._groups = (D.groups || []).length ? 'pick' : 'all';
   }
   const where = D.where || 'private';
   view().innerHTML = `<button class="back" data-act="back">‹ Replies</button>
   <div class="ph"><div><h1>${existing ? 'Edit rule' : 'New rule'}</h1><p>${alwaysOn() ? 'Replies go out within seconds while the bot is online' : 'Replies arrive on the next check (≈30 min)'}</p></div></div>
   <div class="card">
-    <div class="field"><span class="lbl">When a message…</span>${seg('match', [['contains', 'contains'], ['exact', 'is exactly'], ['startsWith', 'starts with'], ['regex', 'regex']], D.match)}</div>
-    <div class="field"><label for="fPat">Words</label><input id="fPat" type="text" data-f="pattern" value="${esc(D.pattern)}" placeholder="price, cost, rate"><p class="hint">"contains": separate options with commas.</p></div>
+    <div class="field"><span class="lbl">When a message…</span>${seg('match', [['word', 'has the words'], ['contains', 'contains'], ['exact', 'is exactly'], ['startsWith', 'starts with'], ['regex', 'regex']], D.match || 'contains')}</div>
+    <div class="field"><label for="fPat">Words</label><input id="fPat" type="text" data-f="pattern" value="${esc(D.pattern)}" placeholder="${(D.match || 'contains') === 'word' ? 'good morning, gm' : 'price, cost, rate'}"><p class="hint">${(D.match || 'contains') === 'word' ? '“has the words”: whole words or a phrase, any capital letters, punctuation ignored. “good morning” matches “Good morning!!” but “gm” does not match “gmail”. Separate options with commas.' : '"contains": any part of the text, separate options with commas.'}</p></div>
     ${sw('Match capital letters exactly', '', 'data-f="caseSensitive"', D.caseSensitive)}
-    <div class="field" style="margin-top:10px"><label for="fRep">Reply (one per line = random pick)</label><textarea id="fRep" data-f="reply" data-type="lines">${esc(Array.isArray(D.reply) ? D.reply.join('\n') : D.reply)}</textarea>${placeholderChips('fRep')}</div>
+    <div style="margin-top:10px">${voiceModeField('Reply with')}</div>
+    ${voicePickerHtml()}
+    <div class="field" style="margin-top:10px" ${D._vmode === 'voice' ? 'hidden' : ''}><label for="fRep">${D._vmode === 'voice+text' ? 'Text after the voice clip' : 'Reply'} (one per line = random pick)</label><textarea id="fRep" data-f="reply" data-type="lines">${esc(Array.isArray(D.reply) ? D.reply.join('\n') : D.reply)}</textarea>${placeholderChips('fRep')}</div>
     <div class="field"><span class="lbl">React with an emoji</span><div class="chips">${['', ...REACTIONS].map((e) => `<button type="button" class="chip ${(D.react || '') === e ? 'on' : ''}" data-act="r-react" data-v="${esc(e)}" aria-pressed="${(D.react || '') === e}">${e || 'No reaction'}</button>`).join('')}</div><p class="hint">Puts the emoji on their message. Leave the reply empty for “reaction only”.</p></div>
   </div>
   <div class="card"><h2>👀 Who this rule works for</h2>
     <div class="field"><span class="lbl">Where</span>${seg('where', [['private', 'Private chats'], ['groups', 'Groups'], ['both', 'Both']], where)}</div>
     ${where !== 'groups' ? `<div class="field"><span class="lbl">People (private chats)</span><div class="seg" role="group">${[['all', 'Everyone'], ['pick', 'Only these…']].map(([v, l]) => `<button type="button" data-act="r-people" data-v="${v}" aria-pressed="${D._people === v}">${l}</button>`).join('')}</div>${D._people === 'pick' ? peopleChips('') : ''}</div>` : ''}
     ${where !== 'private' ? `<div class="field"><span class="lbl">Groups</span>${groupScope('groups', D._groups === 'pick' ? D.groups || [] : 'all', [['all', 'All groups'], ['pick', 'Only these groups']], { all: 'Works in every group you are in.', pick: 'In these groups it answers anyone.' })}</div>` : ''}
-    <div class="field"><label for="fCd">Cooldown per chat (minutes)</label><input id="fCd" type="number" min="0" data-f="cooldownMinutes" data-type="num" value="${esc(D.cooldownMinutes ?? 60)}"><p class="hint">Stops the bot replying again and again in the same chat.</p></div>
+    <div class="field"><span class="lbl">🚫 Never reply to these people</span>${excludeChips('', 'this rule')}</div>
+    <div class="field"><label for="fCd">Cooldown per chat (minutes)</label><input id="fCd" type="number" min="0" data-f="cooldownMinutes" data-type="num" value="${esc(D.cooldownMinutes ?? '')}" placeholder="${draftCd()}"><p class="hint">Stops the bot replying again and again in the same chat${D._vmode !== 'text' ? ' (and never sends the same voice clip to one person twice within this time)' : ''}. Empty = ${draftCd()} min.</p></div>
     ${sw('Rule on', '', 'data-f="enabled"', D.enabled !== false)}
   </div>
   ${existing ? '<button class="btn danger" style="width:100%" data-act="r-del">Delete rule</button>' : ''}
@@ -655,10 +712,15 @@ function renderRuleEditor(id) {
 
 function renderMore() {
   view().innerHTML = `<div class="ph"><div><h1>More</h1></div></div>
-  <div class="card"><div class="list">
+  <div class="card"><div class="list more-list">
+    <a class="row" href="#/sent"><div class="ic">📤</div><div class="main"><div class="t">Sent log</div><div class="d">Everything the bot sent: who, when, what</div></div><div class="r">›</div></a>
+    <a class="row" href="#/notes"><div class="ic">📝</div><div class="main"><div class="t">Notes</div><div class="d">${N.loaded ? `${N.list.length} note${N.list.length === 1 ? '' : 's'} · ` : ''}saved with !note in WhatsApp, or write one here</div></div><div class="r">›</div></a>
+    <a class="row" href="#/appearance"><div class="ic">🎨</div><div class="main"><div class="t">Appearance</div><div class="d">${esc(themeLabel())} · 11 looks for this panel</div></div><div class="r">›</div></a>
+    <a class="row" href="#/voice"><div class="ic">🎙️</div><div class="main"><div class="t">Voice clips</div><div class="d">${V.loaded ? `${V.list.length} clip${V.list.length === 1 ? '' : 's'} · ` : ''}your own voice notes for replies & schedules</div></div><div class="r">›</div></a>
+    <a class="row" href="#/notify"><div class="ic">🔔</div><div class="main"><div class="t">Notifications</div><div class="d">${settings().notify?.enabled && (settings().notify.devices || []).length ? `On · ${(settings().notify.devices || []).length} phone${(settings().notify.devices || []).length > 1 ? 's' : ''}` : 'Off'} · a phone notification for every message the bot sends</div></div><div class="r">›</div></a>
     <a class="row" href="#/status"><div class="ic">📸</div><div class="main"><div class="t">Auto status</div><div class="d">${settings().autoStatus?.enabled ? 'On · ' + esc(pretty12(settings().autoStatus.time)) : 'Off'} · motivational quotes or your own text</div></div><div class="r">›</div></a>
     <a class="row" href="#/festivals"><div class="ic">🪔</div><div class="main"><div class="t">Festivals & occasions</div><div class="d">Diwali, Sankranti, Eid, New Year… 2026–2027</div></div><div class="r">›</div></a>
-    <a class="row" href="#/templates"><div class="ic">📝</div><div class="main"><div class="t">Templates</div><div class="d">Reusable messages with {name}, {date}…</div></div><div class="r">›</div></a>
+    <a class="row" href="#/templates"><div class="ic">🧩</div><div class="main"><div class="t">Templates</div><div class="d">Reusable messages with {name}, {date}…</div></div><div class="r">›</div></a>
     <a class="row" href="#/groups"><div class="ic">👥</div><div class="main"><div class="t">Group tools</div><div class="d">Welcome, anti-link, !tagall, !rules</div></div><div class="r">›</div></a>
     <a class="row" href="#/settings"><div class="ic">⚙️</div><div class="main"><div class="t">Settings</div><div class="d">Features on/off, header, timing, alerts</div></div><div class="r">›</div></a>
     <a class="row" href="#/logs"><div class="ic">🧾</div><div class="main"><div class="t">Logs</div><div class="d">Sent messages, runs, saved media</div></div><div class="r">›</div></a>
@@ -855,6 +917,610 @@ function renderLogs() {
   <div class="card"><div class="list">${body}</div></div>`;
 }
 
+
+/* ---------------- 🔔 notifications (Web Push, no server: the bot sends them from GitHub) ---------------- */
+const b64u = (bytes) => b64encode(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+const unb64u = (str) => b64decode(String(str).replace(/-/g, '+').replace(/_/g, '/') + '==='.slice((String(str).length + 3) % 4));
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window && location.protocol === 'https:';
+let pushHere = { checked: false, endpoint: '', perm: typeof Notification !== 'undefined' ? Notification.permission : 'default' };
+
+/** A VAPID key pair (P-256). The private key is saved inside your ENCRYPTED settings, never in plain text. */
+async function makeVapid() {
+  const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const raw = new Uint8Array(await crypto.subtle.exportKey('raw', kp.publicKey));
+  const jwk = await crypto.subtle.exportKey('jwk', kp.privateKey);
+  return { publicKey: b64u(raw), privateJwk: { kty: 'EC', crv: 'P-256', x: jwk.x, y: jwk.y, d: jwk.d }, createdAt: Date.now() };
+}
+async function swReady() {
+  if (!pushSupported()) throw new Error('Notifications need Chrome (or Edge/Firefox) and the panel opened from its https:// address.');
+  const reg = await Promise.race([navigator.serviceWorker.ready, new Promise((_, no) => setTimeout(() => no(new Error('The panel app is still installing. Reload the page and try again.')), 8000))]);
+  return reg;
+}
+async function phoneName() {
+  try { const h = await navigator.userAgentData?.getHighEntropyValues?.(['model']); if (h?.model) return h.model; } catch {}
+  return /Android/i.test(navigator.userAgent) ? 'Android phone' : /iPhone|iPad/i.test(navigator.userAgent) ? 'iPhone' : 'This device';
+}
+async function checkPushHere() {
+  if (!pushSupported() || S.demo) { pushHere = { checked: true, endpoint: '', perm: 'unsupported' }; return; }
+  try {
+    const reg = await swReady();
+    const sub = await reg.pushManager.getSubscription();
+    pushHere = { checked: true, endpoint: sub?.endpoint || '', perm: Notification.permission };
+  } catch { pushHere = { checked: true, endpoint: '', perm: Notification.permission }; }
+}
+async function enablePush() {
+  if (S.demo) throw new Error('Not in demo mode');
+  if (!pushSupported()) throw new Error('This browser can\'t show notifications. Open the panel in Chrome.');
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') throw new Error(perm === 'denied' ? 'Notifications are blocked for this site. Chrome → ⋮ → Settings → Site settings → Notifications → allow this site, then tap Allow again.' : 'Notifications were not allowed. Tap Allow again and choose "Allow".');
+  const reg = await swReady();
+  const s = settings();
+  const n = s.notify;
+  if (!n.vapid?.publicKey || !n.vapid?.privateJwk?.d) n.vapid = await makeVapid();
+  let sub = await reg.pushManager.getSubscription();
+  const key = sub?.options?.applicationServerKey ? b64u(new Uint8Array(sub.options.applicationServerKey)) : '';
+  if (sub && key && key !== n.vapid.publicKey) { await sub.unsubscribe().catch(() => {}); sub = null; } // made with an old key
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: unb64u(n.vapid.publicKey) });
+  const j = sub.toJSON();
+  n.devices = (n.devices || []).filter((d) => d.endpoint !== j.endpoint);
+  n.devices.push({ id: uid('dev'), name: await phoneName(), endpoint: j.endpoint, keys: { p256dh: j.keys.p256dh, auth: j.keys.auth }, addedAt: Date.now() });
+  n.enabled = true;
+  n.subject = location.origin + location.pathname.replace(/[^/]*$/, '');
+  if (n.selfReports !== true && n.selfReports !== false) n.selfReports = false; // reports now come as notifications (switch below turns your chat back on)
+  await save('settings', s);
+  pushHere = { checked: true, endpoint: j.endpoint, perm: 'granted' };
+  await reg.showNotification('🔔 VR Bot notifications are on', { body: 'This is how they look. Every message the bot sends will show up like this.', icon: 'icons/icon-192.png', tag: 'vr-welcome', data: { url: '#/sent' } }).catch(() => {});
+  toast('Notifications on ✓ — the bot uses them from its next check (~4 min)', 'ok');
+}
+async function disablePushHere() {
+  const reg = await swReady();
+  const sub = await reg.pushManager.getSubscription();
+  const ep = sub?.endpoint || pushHere.endpoint;
+  if (sub) await sub.unsubscribe().catch(() => {});
+  const s = settings();
+  s.notify.devices = (s.notify.devices || []).filter((d) => d.endpoint !== ep);
+  await save('settings', s);
+  pushHere = { checked: true, endpoint: '', perm: Notification.permission };
+}
+async function testPush() {
+  const s = settings();
+  if (!s.notify.enabled || !(s.notify.devices || []).length) throw new Error('Tap "Allow notifications" first');
+  try { const reg = await swReady(); await reg.showNotification('🤖 VR Bot → Test', { body: 'This phone shows VR Bot notifications ✓ A second one comes from the bot itself within ~4 min.', icon: 'icons/icon-192.png', tag: 'vr-test-local', data: { url: '#/notify' } }); } catch {}
+  s.notify.testAt = Date.now();
+  await save('settings', s);
+  toast('Test sent ✓ — one more arrives from the bot within ~4 min (if the bot is running)', 'ok');
+}
+function deviceLine(d) {
+  const st = status().push?.dev?.[epKey(d.endpoint)] || {};
+  if (deviceDead(d, status().push)) return '<span class="bad">❌ Expired — open the panel on this phone and tap Allow notifications again</span>';
+  if (st.ok && (!st.fail || st.ok > st.fail)) return `✅ Last notification ${esc(ago(st.ok))}`;
+  if (st.fail) return `<span class="warn">⚠️ Last try failed ${esc(ago(st.fail))}: ${esc(st.err || '')}</span>`;
+  return 'Added ' + esc(ago(d.addedAt)) + ' · no notification sent yet';
+}
+function renderNotify() {
+  const cur = settings().notify;
+  if (!D || D._id !== 'notify') D = { _id: 'notify', enabled: !!cur.enabled, kinds: { ...cur.kinds }, selfReports: selfReportsOn(settings(), status().push) };
+  if (!pushHere.checked) { checkPushHere().then(() => { if (location.hash === '#/notify') rerender(); }); }
+  const devs = cur.devices || [];
+  const here = pushHere.endpoint && devs.find((d) => d.endpoint === pushHere.endpoint);
+  const ready = pushReady(settings(), status().push);
+  const anyDead = devs.some((d) => deviceDead(d, status().push));
+  const blocked = pushHere.perm === 'denied';
+  const thisPhone = S.demo ? '<p class="hint">Not available in demo mode.</p>' : pushHere.perm === 'unsupported'
+    ? '<p class="hint">⚠️ This browser can\'t show notifications. Open the panel in Chrome on your phone.</p>'
+    : here
+      ? `<p class="small" style="margin-top:0">✅ <b>This phone gets notifications.</b></p><div class="btns"><button class="btn cy" data-act="push-test">📨 Send test notification</button><button class="btn sm" data-act="push-off">Turn off on this phone</button></div>`
+      : `<p class="small muted" style="margin-top:0">${pushHere.endpoint ? 'This phone\'s notification link changed. Tap Allow again.' : 'Tap Allow, then choose “Allow” in the box Chrome shows.'}</p>
+        <div class="btns"><button class="btn primary" data-act="push-enable">🔔 Allow notifications</button>${devs.length ? '<button class="btn cy" data-act="push-test">📨 Send test notification</button>' : ''}</div>
+        ${blocked ? '<p class="hint">⚠️ Chrome has blocked notifications for this site. Chrome → ⋮ → Settings → Site settings → Notifications → find this site → Allow. Then tap Allow above.</p>' : ''}`;
+  view().innerHTML = `<button class="back" data-act="go" data-v="#/more">‹ More</button>
+  <div class="ph"><div><h1>Notifications</h1><p>A phone notification every time VR Bot sends a message</p></div></div>
+  <div class="card"><h2>📱 This phone</h2>${thisPhone}
+    <p class="hint">Looks like: <b>🤖 VR Bot → Mummy</b> · “Good morning…”. Tap it to open the 📤 Sent log. Swipe to clear.</p></div>
+  <div class="card"><h2>🔔 What notifies you</h2>
+    ${sw('Notifications', ready ? 'On for ' + devs.filter((d) => !deviceDead(d, status().push)).length + ' phone(s)' : devs.length ? 'No working phone — tap Allow again' : 'Tap Allow above first', 'data-f="enabled" data-rr="1"', D.enabled)}
+    ${D.enabled ? NOTIFY_KINDS.map(([k, t, d]) => sw(t, esc(d), `data-f="kinds.${k}"`, D.kinds[k] !== false)).join('') : ''}
+  </div>
+  <div class="card"><h2>🙋 My own WhatsApp chat</h2>
+    ${sw('Send reports to my own WhatsApp chat', 'Daily summary, weekly report, birthday notes, busy-over, GitHub & website alerts, voice-note text. Off = they come as notifications and in the Sent log instead.', 'data-f="selfReports"', D.selfReports)}
+    <p class="hint">Always still sent to your chat: replies to your ! commands, “Post test” / “Send report now” results, and ❌ couldn't-send alerts. If no phone can get notifications (none added, or expired), reports go to your chat anyway so nothing is lost.</p>
+  </div>
+  ${devs.length ? `<div class="card"><h2>📲 Phones</h2><div class="list">${devs.map((d) => `<div class="row"><div class="ic">${d.endpoint === pushHere.endpoint ? '📱' : '📲'}</div><div class="main"><div class="t">${esc(d.name || 'Phone')}${d.endpoint === pushHere.endpoint ? ' <span class="pill cy tiny">this phone</span>' : ''}</div><div class="d" style="white-space:normal">${deviceLine(d)}</div></div><button class="btn sm" data-act="push-rm" data-id="${esc(d.id)}" aria-label="Remove ${esc(d.name || 'phone')}">Remove</button></div>`).join('')}</div>
+    ${anyDead ? '<p class="hint">A phone shows ❌ when Chrome there was reset, the site data was cleared, or notifications were blocked.</p>' : ''}
+    <p class="hint">Phone status updates when the bot saves (about every 10 min).</p></div>` : ''}
+  <div class="card"><h2>ℹ️ Good to know</h2><p class="small muted" style="margin:0">Notifications come straight from the bot while it is running on GitHub (Always on keeps it running). Each one is encrypted for this phone; Google's push service only passes it on. If notifications stop on Android: Settings → Apps → Chrome → Battery → Unrestricted.</p></div>
+  <div class="sticky-save"><button class="btn primary" data-act="notify-save">Save notifications</button></div>`;
+}
+
+/* ---------------- 📤 Sent log ---------------- */
+let sentCat = 'all';
+let pushLog = [];
+async function readPushLog() {
+  try { const c = await caches.open('vr-bot-pushlog'); const r = await c.match('pushlog.json'); pushLog = r ? await r.json() : []; } catch { pushLog = []; }
+}
+function peopleList(e) {
+  const ppl = e.people || [];
+  if (!ppl.length) return '';
+  return `<details class="sent-who"><summary>👀 Who can see it (${e.count ?? ppl.length})</summary><div class="chips" style="margin-top:6px">${ppl.map((x) => `<span class="chip static">${esc(x.name)}${x.recent ? ' <span class="tiny muted">texted you lately</span>' : ''}</span>`).join('')}</div></details>`;
+}
+function sentRow(e) {
+  const t = new Date(e.t).toLocaleTimeString('en-IN', { timeZone: tz(), hour: 'numeric', minute: '2-digit' });
+  const txt = String(e.text || '');
+  const long = txt.length > 180;
+  const head = e.cat === 'status' ? `📸 My status → ${e.count ?? (e.people || []).length} ${e.count === 1 ? 'person' : 'people'}` : e.cat === 'reports' ? `📋 ${esc(e.title || 'Report')} (to you)` : esc(e.to || 'a chat');
+  return `<div class="row" style="align-items:flex-start"><div class="ic">${e.kind === 'voice' ? '🎙️' : e.kind === 'class' ? '🎓' : CAT_ICON[e.cat] || '💬'}</div><div class="main"><div class="t">${head} <span class="pill tiny">${esc(CAT_LABEL[e.cat] || e.cat || '')}</span>${e._push ? ' <span class="pill cy tiny">new</span>' : ''}</div>
+    <div class="d" style="white-space:pre-wrap;word-break:break-word">${long ? `<details class="sent-more"><summary><span style="color:var(--muted);font-weight:400">${esc(txt.slice(0, 180))}…</span> Show all</summary>${esc(txt)}</details>` : esc(txt)}</div>${peopleList(e)}</div><div class="r">${esc(t)}</div></div>`;
+}
+function renderSent() {
+  if (!renderSent.reading) { // notifications that reached this phone since the last look
+    const before = pushLog.length;
+    renderSent.reading = readPushLog().then(() => { renderSent.reading = null; if (pushLog.length !== before && location.hash === '#/sent') rerender(); });
+  }
+  const box = S.state.outbox;
+  const lastSaved = box?.entries?.length ? Math.max(...box.entries.map((e) => e.t || 0)) : 0;
+  const all = sentList(box, pushLog.filter((x) => x.t > lastSaved - 60000).map((x) => ({ ...x, _push: true })));
+  const list = sentCat === 'all' ? all : all.filter((e) => e.cat === sentCat);
+  let day = '', body = '';
+  const today = localDate(Date.now(), tz()), yest = localDate(Date.now() - 86400000, tz());
+  for (const e of list.slice(0, 300)) {
+    const d = localDate(e.t, tz());
+    if (d !== day) { day = d; body += `<div class="row"><div class="main"><div class="t small muted">${d === today ? 'Today' : d === yest ? 'Yesterday' : esc(prettyDate(d))}</div></div></div>`; }
+    body += sentRow(e);
+  }
+  const n = all.filter((e) => localDate(e.t, tz()) === today).length;
+  view().innerHTML = `<button class="back" data-act="go" data-v="#/more">‹ More</button>
+  <div class="ph"><div><h1>Sent log</h1><p>${n} sent today · last 300, up to 14 days</p></div><button class="btn sm" data-act="sent-reload">↻ Refresh</button></div>
+  <div class="field">${seg('sentCat', [['all', 'All'], ['scheduled', 'Scheduled'], ['replies', 'Replies'], ['ai', 'AI'], ['status', 'Status'], ['reports', 'Reports'], ['self', 'My chat']], sentCat)}</div>
+  <div class="card"><div class="list">${body || '<p class="muted small" style="margin:0">Nothing yet. Sends show up here after the bot saves (about every 10 min) — or right away from notifications on this phone.</p>'}</div></div>
+  <p class="hint">New sends appear here when the bot saves (about every 10 min). Notifications on this phone show up instantly (marked “new”). Saved encrypted with your password.</p>`;
+}
+
+
+/* ---------------- 🎙️ voice clips (your own prerecorded voice notes) ----------------
+ * Stored ENCRYPTED on the "vr-voice" branch (never main): voice/<id>.meta.json + voice/<id>.audio.json.
+ * Recordings are repacked to Ogg/Opus (a real WhatsApp voice note) right here on the phone; mp3/m4a/wav are
+ * re-encoded with the browser's Opus encoder. If this browser cannot, the bot converts the file once (ffmpeg). */
+const V = { list: [], loaded: false, loading: null, err: '', meta: new Map(), audio: new Map(), player: null, playing: '' };
+const REC = { state: 'idle', err: '', name: '', url: '', prepared: null, mr: null, timer: null, startAt: 0, open: false };
+const VOICE_README = '# VR Bot voice clips (encrypted)\nYour prerecorded voice notes. Every file here is encrypted with your panel password.\nManage them in your VR Bot panel → More → Voice clips.\n\n© VR DEVELOPMENTS\n';
+const vapi = {
+  async list() {
+    if (S.demo) return clone((S.demoStore.voice || []).map((c) => c.meta));
+    const dir = await gh(`${repo()}/contents/${VOICE_DIR}?ref=${VOICE_BRANCH}`);
+    if (!Array.isArray(dir)) return [];
+    const files = new Map(dir.map((f) => [f.path, f]));
+    const out = [];
+    await Promise.all(dir.map(async (f) => {
+      const c = clipIdFromPath(f.path);
+      if (!c || c.part !== 'meta') return;
+      const audio = files.get(clipPaths(c.id).audio);
+      if (!audio) return;
+      let meta = V.meta.get(f.sha);
+      if (!meta) {
+        try { meta = await decryptJSON(JSON.parse(await gh(`${repo()}/contents/${f.path}?ref=${VOICE_BRANCH}`, { raw: true })), S.pass); V.meta.set(f.sha, meta); }
+        catch (e) { console.warn('voice clip', c.id, e); return; }
+      }
+      out.push({ ...meta, id: c.id, metaSha: f.sha, audioSha: audio.sha, size: meta.size || audio.size });
+    }));
+    return out;
+  },
+  async ensureBranch() {
+    if (S.demo) return;
+    if (await gh(`${repo()}/git/ref/heads/${VOICE_BRANCH}`)) return;
+    const tree = await gh(`${repo()}/git/trees`, { method: 'POST', body: { tree: [{ path: 'README.md', mode: '100644', type: 'blob', content: VOICE_README }] } });
+    const commit = await gh(`${repo()}/git/commits`, { method: 'POST', body: { message: 'VR Bot voice clips (encrypted)', tree: tree.sha, parents: [] } });
+    try { await gh(`${repo()}/git/refs`, { method: 'POST', body: { ref: `refs/heads/${VOICE_BRANCH}`, sha: commit.sha } }); }
+    catch (e) { if (e.status !== 422) throw e; } // made a second ago by the bot
+  },
+  async put(path, obj, sha, message) {
+    const body = (s) => ({ message, content: utf8.enc(JSON.stringify(obj)), branch: VOICE_BRANCH, ...(s ? { sha: s } : {}) });
+    try { return await gh(`${repo()}/contents/${path}`, { method: 'PUT', body: body(sha) }); }
+    catch (e) {
+      if (e.status !== 409 && e.status !== 422) throw e;
+      const cur = await gh(`${repo()}/contents/${path}?ref=${VOICE_BRANCH}`);
+      return gh(`${repo()}/contents/${path}`, { method: 'PUT', body: body(cur?.sha) });
+    }
+  },
+  async del(path, sha) {
+    if (!sha) return;
+    await gh(`${repo()}/contents/${path}`, { method: 'DELETE', body: { message: 'VR Bot panel: delete voice clip', sha, branch: VOICE_BRANCH } }).catch((e) => { if (e.status !== 404 && e.status !== 409 && e.status !== 422) throw e; });
+  },
+  async audio(meta) {
+    if (S.demo) return (S.demoStore.voice || []).find((c) => c.meta.id === meta.id)?.bytes || null;
+    const env = JSON.parse(await gh(`${repo()}/contents/${clipPaths(meta.id).audio}?ref=${VOICE_BRANCH}`, { raw: true }));
+    return decryptBytes(env, S.pass);
+  },
+};
+function loadVoices(force = false) {
+  if (V.loaded && !force) return Promise.resolve(V.list);
+  if (V.loading) return V.loading;
+  V.loading = vapi.list().then((l) => { V.list = l.sort((a, b) => nameKey(a.name).localeCompare(nameKey(b.name))); V.loaded = true; V.err = ''; return V.list; })
+    .catch((e) => { V.err = e.message; return V.list; })
+    .finally(() => { V.loading = null; });
+  return V.loading;
+}
+/** Draw now; if the clips are not loaded yet, load them and draw again. */
+const needVoices = () => { if (!V.loaded && !V.loading) loadVoices().then(() => rerender()); };
+
+/** Any audio → { bytes, fmt: "ogg"|"raw", mime, secs, waveform }. Ogg/Opus = ready to send as a voice note. */
+async function prepareAudio(u8, mimeHint = '') {
+  const L = VOICE_LIMITS;
+  if (!u8.length) throw new Error('The recording is empty');
+  if (u8.length > L.maxUploadBytes) throw new Error(`File too big (${fmtSize(u8.length)}). Max ${fmtSize(L.maxUploadBytes)}.`);
+  const ab = (b) => b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength);
+  let ogg = null, secs = 0, waveform = null;
+  const kind = sniffAudio(u8);
+  if (kind === 'ogg' && isOggOpus(u8)) ogg = u8;
+  else if (kind === 'webm') { try { ogg = webmToOgg(u8); } catch (e) { console.warn('webm repack', e); } }
+  if (!ogg) {
+    const r = await encodeToOgg(ab(u8), { maxSeconds: L.maxSeconds }).catch((e) => { if (/Too long/.test(e.message)) throw e; console.warn('opus encode', e); return null; });
+    if (r) { ogg = r.ogg; secs = r.seconds; waveform = r.waveform; }
+  }
+  if (!waveform) {
+    try {
+      const ctx = new OfflineAudioContext(1, 48000, 48000);
+      const buf = await ctx.decodeAudioData(ab(ogg || u8));
+      secs = secs || buf.duration; waveform = waveformOf(buf.getChannelData(0));
+    } catch (e) { console.warn('decode', e); }
+  }
+  if (ogg && !secs) secs = readOgg(ogg).seconds;
+  secs = Math.round((secs || 0) * 10) / 10;
+  if (secs > L.maxSeconds + 0.5) throw new Error(`Too long: ${fmtSecs(secs)}. Max ${L.maxSeconds} s.`);
+  if (ogg) {
+    if (ogg.length > L.maxBytes) throw new Error(`Too big as a voice note (${fmtSize(ogg.length)}). Max ${fmtSize(L.maxBytes)} — use a shorter clip.`);
+    return { bytes: ogg, fmt: 'ogg', mime: 'audio/ogg; codecs=opus', secs, waveform };
+  }
+  if (u8.length > L.maxRawBytes) throw new Error(`This phone can't convert this file and it is too big for the bot to convert (max ${fmtSize(L.maxRawBytes)}). Try an mp3 or a shorter clip.`);
+  return { bytes: u8, fmt: 'raw', mime: mimeHint || 'audio/mpeg', secs, waveform };
+}
+
+async function saveClip(name, p) {
+  const nm = cleanName(name);
+  if (!nm) throw new Error('Name the clip');
+  await loadVoices(true);
+  const old = V.list.find((c) => nameKey(c.name) === nameKey(nm));
+  if (old && !confirm(`A clip called "${old.name}" exists. Replace it? (rules and schedules using it get the new recording)`)) return null;
+  if (!old && V.list.length >= VOICE_LIMITS.maxClips) throw new Error(`Max ${VOICE_LIMITS.maxClips} clips — delete one first`);
+  const meta = { v: 1, id: old?.id || newClipId(), name: nm, secs: p.secs, size: p.bytes.length, fmt: p.fmt, mime: p.mime, waveform: p.waveform || null, by: 'panel', at: Date.now() };
+  toast('Saving clip (encrypted)…');
+  if (S.demo) {
+    S.demoStore.voice = [...(S.demoStore.voice || []).filter((c) => c.meta.id !== meta.id), { meta, bytes: p.bytes }];
+  } else {
+    await vapi.ensureBranch();
+    const paths = clipPaths(meta.id);
+    await vapi.put(paths.audio, await encryptBytes(p.bytes, S.pass), old?.audioSha, 'VR Bot panel: voice clip');
+    await vapi.put(paths.meta, await encryptJSON(meta, S.pass), old?.metaSha, 'VR Bot panel: voice clip info');
+  }
+  V.audio.delete(meta.id);
+  await loadVoices(true);
+  toast(p.fmt === 'raw' ? 'Saved ✓ — the bot converts it to a voice note on its next check' : 'Clip saved ✓', 'ok');
+  return V.list.find((c) => c.id === meta.id) || meta;
+}
+
+async function deleteClip(id) {
+  const c = V.list.find((x) => x.id === id);
+  if (!c) return;
+  const users = [...rules().filter((r) => voicePlan(r).voice && findClip([c], r.voice)).map((r) => `rule “${r.pattern}”`), ...schedules().filter((x) => voicePlan(x).voice && findClip([c], x.voice)).map((x) => `schedule “${x.name}”`)];
+  if (!confirm(`Delete the clip "${c.name}"?${users.length ? `\n\nUsed by: ${users.join(', ')} — they will send nothing until you pick another clip.` : ''}`)) return;
+  if (S.demo) S.demoStore.voice = (S.demoStore.voice || []).filter((x) => x.meta.id !== id);
+  else { const p = clipPaths(id); await vapi.del(p.meta, c.metaSha); await vapi.del(p.audio, c.audioSha); }
+  V.audio.delete(id);
+  await loadVoices(true);
+  toast('Clip deleted', 'ok');
+}
+
+async function playClip(id) {
+  if (V.player) { V.player.pause(); V.player = null; }
+  if (V.playing === id) { V.playing = ''; rerender(); return; }
+  const c = V.list.find((x) => x.id === id);
+  if (!c) return;
+  let url = V.audio.get(id);
+  if (!url) {
+    toast('Loading…');
+    const bytes = await vapi.audio(c);
+    if (!bytes) throw new Error('Could not load the clip');
+    url = URL.createObjectURL(new Blob([bytes], { type: c.fmt === 'raw' ? (c.mime || 'audio/mpeg') : 'audio/ogg' }));
+    V.audio.set(id, url);
+  }
+  V.player = new Audio(url); V.playing = id;
+  V.player.onended = () => { V.playing = ''; V.player = null; rerender(); };
+  await V.player.play();
+  rerender();
+}
+
+/* recorder */
+function recReset() {
+  if (REC.timer) clearInterval(REC.timer);
+  if (REC.url) URL.revokeObjectURL(REC.url);
+  Object.assign(REC, { state: 'idle', err: '', name: '', url: '', prepared: null, mr: null, timer: null, startAt: 0 });
+}
+async function recStart() {
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') throw new Error('This browser cannot record — use 📁 Upload audio');
+  recReset();
+  let stream;
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 } }); }
+  catch (e) { throw new Error('Microphone blocked. Allow it: tap the 🔒 next to the address → Permissions → Microphone → Allow'); }
+  const mime = ['audio/ogg;codecs=opus', 'audio/webm;codecs=opus', 'audio/webm', 'audio/mp4'].find((m) => MediaRecorder.isTypeSupported?.(m)) || '';
+  const chunks = [];
+  const mr = new MediaRecorder(stream, { ...(mime ? { mimeType: mime } : {}), audioBitsPerSecond: 48000 });
+  mr.ondataavailable = (e) => { if (e.data?.size) chunks.push(e.data); };
+  mr.onstop = () => {
+    stream.getTracks().forEach((t) => t.stop());
+    clearInterval(REC.timer); REC.timer = null;
+    recUse(new Blob(chunks, { type: mr.mimeType || mime || 'audio/webm' })).catch(() => {});
+  };
+  REC.mr = mr; REC.state = 'rec'; REC.startAt = Date.now();
+  mr.start(250);
+  REC.timer = setInterval(() => {
+    const s = (Date.now() - REC.startAt) / 1000;
+    const el = $('#vTimer'); if (el) el.textContent = `${fmtSecs(s)} / ${fmtSecs(VOICE_LIMITS.maxSeconds)}`;
+    if (s >= VOICE_LIMITS.maxSeconds && REC.mr?.state === 'recording') REC.mr.stop();
+  }, 250);
+  rerender();
+}
+function recStop() { if (REC.mr && REC.mr.state === 'recording') { REC.state = 'busy'; REC.mr.stop(); rerender(); } }
+async function recUse(blob, nameGuess = '') {
+  REC.state = 'busy'; REC.err = ''; rerender();
+  try {
+    const p = await prepareAudio(new Uint8Array(await blob.arrayBuffer()), blob.type);
+    REC.prepared = p;
+    REC.url = URL.createObjectURL(new Blob([p.bytes], { type: p.fmt === 'ogg' ? 'audio/ogg' : (p.mime || blob.type || 'audio/mpeg') }));
+    if (nameGuess && !REC.name) REC.name = cleanName(nameGuess);
+    REC.state = 'done';
+  } catch (e) { REC.state = 'idle'; REC.err = e.message; }
+  rerender();
+}
+async function recSave() {
+  if (!REC.prepared) return;
+  const name = ($('#vName')?.value ?? REC.name);
+  REC.state = 'busy'; rerender();
+  try {
+    const meta = await saveClip(name, REC.prepared);
+    if (!meta) { REC.state = 'done'; rerender(); return; }
+    if (D && (D._kind === 'rule' || D._kind === 'schedule')) { D.voice = { clip: meta.id, name: meta.name }; if (!D._vmode || D._vmode === 'text') D._vmode = 'voice'; }
+    recReset(); REC.open = false;
+  } catch (e) { REC.state = 'done'; REC.err = e.message; }
+  rerender();
+}
+
+function recorderHtml() {
+  const L = VOICE_LIMITS;
+  const err = REC.err ? `<p class="small" style="color:var(--bad,#e5484d);margin:8px 0 0">⚠️ ${esc(REC.err)}</p>` : '';
+  if (REC.state === 'rec') return `<div class="vrec"><div class="t"><span class="dot-rec">●</span> Recording <b id="vTimer">${fmtSecs((Date.now() - REC.startAt) / 1000)} / ${fmtSecs(L.maxSeconds)}</b></div><div class="btns" style="margin-top:8px"><button type="button" class="btn primary" data-act="v-stop">■ Stop</button></div></div>`;
+  if (REC.state === 'busy') return '<div class="vrec"><p class="small muted" style="margin:0">⏳ Working… (converting to a WhatsApp voice note)</p></div>';
+  if (REC.state === 'done' && REC.prepared) {
+    const p = REC.prepared;
+    return `<div class="vrec"><audio controls src="${esc(REC.url)}" style="width:100%"></audio>
+      <p class="small muted" style="margin:6px 0">${p.secs ? fmtSecs(p.secs) : '?'} · ${fmtSize(p.bytes.length)} · ${p.fmt === 'ogg' ? '✅ ready as a voice note' : '⏳ the bot converts this file to a voice note on its next check'}</p>
+      <div class="field"><label for="vName">Clip name</label><input id="vName" type="text" maxlength="40" value="${esc(REC.name)}" placeholder="good morning"></div>
+      <div class="btns"><button type="button" class="btn primary" data-act="v-save">💾 Save clip</button><button type="button" class="btn" data-act="v-redo">↺ Again</button><button type="button" class="btn ghost" data-act="v-cancel">Cancel</button></div>${err}</div>`;
+  }
+  return `<div class="vrec"><div class="btns"><button type="button" class="btn primary" data-act="v-rec">🎙️ Record</button><label class="btn" for="vFile" style="cursor:pointer">📁 Upload audio</label></div>
+    <input id="vFile" type="file" accept="audio/*,.ogg,.opus,.oga,.mp3,.wav,.m4a,.aac,.webm,.amr,.flac" hidden>
+    <p class="hint">Max ${L.maxSeconds} s. mp3, m4a, wav, ogg/opus… all become a real WhatsApp voice note.</p>${err}</div>`;
+}
+
+function clipRow(c, { pick = false, picked = false } = {}) {
+  const info = `${c.secs ? fmtSecs(c.secs) : '?'} · ${fmtSize(c.size)} · ${c.by === 'whatsapp' ? 'from WhatsApp' : 'from panel'}${c.fmt === 'raw' ? ' · ⏳ converting' : ''}`;
+  return `<div class="row"><button type="button" class="ic" data-act="v-play" data-v="${esc(c.id)}" aria-label="Play ${esc(c.name)}" style="border:0;background:none;font-size:20px;cursor:pointer">${V.playing === c.id ? '⏸️' : '▶️'}</button>
+    <div class="main"><div class="t">${esc(c.name)}</div><div class="d">${esc(info)}</div></div>
+    <div class="r">${pick ? `<button type="button" class="chip ${picked ? 'on' : ''}" data-act="v-pick" data-v="${esc(c.id)}" aria-pressed="${picked}">${picked ? '✓ Picked' : 'Use'}</button>` : `<button type="button" class="btn sm ghost" data-act="v-del" data-v="${esc(c.id)}" aria-label="Delete ${esc(c.name)}">🗑️</button>`}</div></div>`;
+}
+
+/** Rule / schedule editor: "Reply with: Text / Voice clip / Voice clip + text" + the clip picker. */
+/** "→ 🎙️ good morning + Hi {name}" — what a rule sends, for the rules list. */
+function ruleSummary(r) {
+  const vp = voicePlan(r);
+  const text = (Array.isArray(r.reply) ? r.reply[0] : r.reply) || '';
+  const parts = [r.react || '', vp.voice ? `🎙️ ${r.voice.name || 'voice clip'}` : '', vp.text && text ? (vp.voice ? `+ ${text}` : text) : ''].filter(Boolean);
+  return parts.join(' ') || 'reaction only';
+}
+/** Cooldown the draft rule gets when the box is empty (10 min for voice rules, 60 for text). */
+const draftCd = () => ruleCooldown({ ...D, cooldownMinutes: null, voice: D._vmode && D._vmode !== 'text' ? { clip: 'x', mode: D._vmode } : null });
+function voiceModeField(what = 'Reply with') {
+  return `<div class="field"><span class="lbl">${esc(what)}</span>${seg('_vmode', [['text', 'Text'], ['voice', '🎙️ Voice clip'], ['voice+text', '🎙️ Voice + text']], D._vmode || 'text')}</div>`;
+}
+function voicePickerHtml() {
+  if ((D._vmode || 'text') === 'text') return '';
+  needVoices();
+  const cur = findClip(V.list, D.voice);
+  const list = V.loaded ? (V.list.map((c) => clipRow(c, { pick: true, picked: cur?.id === c.id })).join('') || '<p class="muted small" style="margin:0">No clips yet — record or upload one below.</p>') : '<p class="muted small" style="margin:0">Loading your clips…</p>';
+  const gone = D.voice?.clip && V.loaded && !cur ? `<p class="small" style="color:var(--bad,#e5484d)">⚠️ The clip “${esc(D.voice.name || '')}” was deleted — pick another.</p>` : '';
+  return `<div class="field"><span class="lbl">Voice clip</span><div class="list">${list}</div>${gone}
+    ${REC.open || (V.loaded && !V.list.length) ? recorderHtml() : '<button type="button" class="btn sm" style="margin-top:8px" data-act="v-new">＋ Record / upload a new clip</button>'}
+    <p class="hint">Goes out as a real voice note from your number — no caption, no header, nothing that says “bot”.</p></div>`;
+}
+/** Put the draft's voice choice into the saved item (and check it). */
+function applyVoice(item, needText) {
+  const mode = D._vmode || 'text';
+  delete item._vmode;
+  if (mode === 'text') { delete item.voice; return; }
+  const c = findClip(V.list, D.voice);
+  if (!c) throw new Error('Pick a voice clip (or record one)');
+  item.voice = { clip: c.id, name: c.name, mode };
+  if (mode === 'voice+text' && needText && !needText()) throw new Error('Write the text that goes with the voice clip, or choose “Voice clip” only');
+}
+
+function renderVoice() {
+  needVoices();
+  const list = V.list;
+  view().innerHTML = `<button class="back" data-act="back">‹ More</button>
+  <div class="ph"><div><h1>🎙️ Voice clips</h1><p>Your own voice notes — for keyword replies and schedules</p></div><button class="btn sm" data-act="v-reload">↻</button></div>
+  <div class="card"><h2>New clip</h2>${recorderHtml()}</div>
+  <div class="card"><h2>Your clips <span class="count">${list.length}</span></h2>
+    ${V.err ? `<p class="small" style="color:var(--bad,#e5484d)">⚠️ ${esc(V.err)}</p>` : ''}
+    <div class="list">${!V.loaded ? '<p class="muted small" style="margin:0">Loading…</p>' : list.map((c) => clipRow(c)).join('') || '<p class="empty">No clips yet.</p>'}</div></div>
+  <div class="card"><h2>From WhatsApp</h2><p class="small muted" style="margin:0">Send a voice note (or audio file) to your own chat, then reply to it with <b>${esc(settings().commands?.prefix || '!')}voice save good morning</b>. Also: <b>!voice list</b>, <b>!voice play &lt;name&gt;</b>, <b>!voice delete &lt;name&gt;</b>.</p></div>
+  <p class="hint">Use a clip: Replies → a rule → Reply with “🎙️ Voice clip”, or Schedules → a message → Send “🎙️ Voice clip”. Clips are saved encrypted with your password on the vr-voice branch of your repo, so nobody can play them there.</p>`;
+}
+
+/* ---------------- 📝 notes (encrypted on the vr-notes branch) ---------------- */
+const N = { list: [], loaded: false, loading: null, err: '', q: '', dec: new Map(), draft: '' };
+const NOTES_README = '# VR Bot notes (encrypted)\nNotes you saved with !note in WhatsApp or in the panel. Every file here is encrypted with your panel password.\nRead them in your VR Bot panel → More → Notes.\n\n© VR DEVELOPMENTS\n';
+const NOTE_KIND_ICON = { text: '📝', link: '🔗', image: '📷', video: '🎬', document: '📄', audio: '🎵', voice: '🎤', sticker: '🙂', contact: '👤', location: '📍', poll: '📊' };
+/** Encrypted note files are cached on this phone by their git id, so opening Notes only downloads new ones. */
+const noteCache = {
+  read() { try { return JSON.parse(localStorage.getItem('vrbot.notes.enc') || '{}'); } catch { return {}; } },
+  write(obj) { try { localStorage.setItem('vrbot.notes.enc', JSON.stringify(obj)); } catch { /* full: fine, just slower */ } },
+};
+const napi = {
+  async list() {
+    if (S.demo) return clone(S.demoStore.notes || []);
+    const dir = await gh(`${repo()}/contents/${NOTES_DIR}?ref=${NOTES_BRANCH}`);
+    if (!Array.isArray(dir)) return [];
+    const cache = noteCache.read(), keep = {};
+    const out = [];
+    const files = dir.filter((f) => noteIdFromPath(f.path));
+    for (let i = 0; i < files.length; i += 8) { // 8 at a time (GitHub is happier than with 100 at once)
+      await Promise.all(files.slice(i, i + 8).map(async (f) => {
+        const id = noteIdFromPath(f.path);
+        try {
+          let note = N.dec.get(f.sha);
+          if (!note) {
+            const env = cache[f.sha] || JSON.parse(await gh(`${repo()}/contents/${f.path}?ref=${NOTES_BRANCH}`, { raw: true }));
+            keep[f.sha] = env;
+            note = await decryptJSON(env, S.pass);
+            N.dec.set(f.sha, note);
+          } else if (cache[f.sha]) keep[f.sha] = cache[f.sha];
+          out.push({ ...note, id, sha: f.sha });
+        } catch (e) { if (e.code === 'BAD_PASSPHRASE') throw e; console.warn('note', id, e); }
+      }));
+    }
+    noteCache.write(keep);
+    return out;
+  },
+  async ensureBranch() {
+    if (S.demo) return;
+    if (await gh(`${repo()}/git/ref/heads/${NOTES_BRANCH}`)) return;
+    const tree = await gh(`${repo()}/git/trees`, { method: 'POST', body: { tree: [{ path: 'README.md', mode: '100644', type: 'blob', content: NOTES_README }] } });
+    const commit = await gh(`${repo()}/git/commits`, { method: 'POST', body: { message: 'VR Bot notes (encrypted)', tree: tree.sha, parents: [] } });
+    try { await gh(`${repo()}/git/refs`, { method: 'POST', body: { ref: `refs/heads/${NOTES_BRANCH}`, sha: commit.sha } }); }
+    catch (e) { if (e.status !== 422) throw e; } // made a second ago by the bot
+  },
+  async add(note) {
+    if (S.demo) { S.demoStore.notes = [...(S.demoStore.notes || []), note]; return; }
+    await napi.ensureBranch();
+    const env = await encryptJSON(note, S.pass);
+    const r = await gh(`${repo()}/contents/${notePath(note.id)}`, { method: 'PUT', body: { message: 'VR Bot panel: add a note', content: utf8.enc(JSON.stringify(env)), branch: NOTES_BRANCH } });
+    if (r?.content?.sha) { const c = noteCache.read(); c[r.content.sha] = env; noteCache.write(c); N.dec.set(r.content.sha, note); }
+  },
+  async del(note) {
+    if (S.demo) { S.demoStore.notes = (S.demoStore.notes || []).filter((x) => x.id !== note.id); return; }
+    await gh(`${repo()}/contents/${notePath(note.id)}`, { method: 'DELETE', body: { message: 'VR Bot panel: delete a note', sha: note.sha, branch: NOTES_BRANCH } })
+      .catch((e) => { if (e.status !== 404 && e.status !== 409 && e.status !== 422) throw e; });
+  },
+};
+function loadNotes(force = false) {
+  if (N.loaded && !force) return Promise.resolve(N.list);
+  if (N.loading) return N.loading;
+  N.loading = napi.list().then((l) => { N.list = sortNotes(l); N.loaded = true; N.err = ''; return N.list; })
+    .catch((e) => { N.err = e.message; N.loaded = true; return N.list; })
+    .finally(() => { N.loading = null; });
+  return N.loading;
+}
+const needNotes = () => { if (!N.loaded && !N.loading) loadNotes().then(() => { if (location.hash === '#/notes') rerender(); }); };
+const linkified = (text) => linkParts(text).map((p) => (p.href ? `<a href="${esc(p.href)}" target="_blank" rel="noopener noreferrer">${esc(p.text)}</a>` : esc(p.text))).join('');
+function noteCard(n) {
+  const num = N.list.indexOf(n) + 1;
+  const who = n.from === 'forwarded' ? 'forwarded' : n.from && n.from !== 'me' ? `from ${esc(n.from)}${n.chat ? ` in ${esc(n.chat)}` : ''}` : n.chat ? `in ${esc(n.chat)}` : '';
+  const meta = [`#${num}`, who, esc(whenText(n.at || 0)), n.by === 'panel' ? 'panel' : 'WhatsApp'].filter(Boolean).join(' · ');
+  return `<article class="note"><div class="note-meta"><span aria-hidden="true">${NOTE_KIND_ICON[n.kind] || '📝'}</span><span>${meta}</span></div>
+    <div class="note-text">${linkified(n.text || '')}</div>
+    <div class="btns"><button class="btn sm" data-act="n-copy" data-v="${esc(n.id)}">📋 Copy</button><button class="btn sm danger" data-act="n-del" data-v="${esc(n.id)}" aria-label="Delete note ${num}">🗑️ Delete</button></div></article>`;
+}
+function notesListHtml() {
+  if (!N.loaded) return '<p class="muted small" style="margin:0">Loading your notes…</p>';
+  const shown = searchNotes(N.list, N.q);
+  if (!N.list.length) return '<p class="empty">No notes yet. Write one above, or send <b>!note buy charger</b> to your own WhatsApp chat.</p>';
+  if (!shown.length) return `<p class="empty">No note has “${esc(N.q)}”.</p>`;
+  return shown.map(noteCard).join('');
+}
+function renderNotes() {
+  needNotes();
+  const p = settings().commands?.prefix || '!';
+  view().innerHTML = `<button class="back" data-act="back">‹ More</button>
+  <div class="ph"><div><h1>📝 Notes</h1><p>Saved from WhatsApp with ${esc(p)}note, or written here</p></div><button class="btn sm" data-act="n-reload" aria-label="Refresh notes">↻</button></div>
+  <div class="card"><h2>New note</h2>
+    <div class="field" style="margin-bottom:10px"><label for="nNew" class="sr">New note</label><textarea id="nNew" placeholder="Buy charger · exam on 5th · paste a link…" maxlength="${NOTES_LIMITS.maxChars}">${esc(N.draft)}</textarea></div>
+    <button class="btn primary" data-act="n-add" style="width:100%">Save note</button></div>
+  <div class="card"><h2>Your notes <span class="count">${N.list.length}</span></h2>
+    ${N.err ? `<p class="small" style="color:var(--bad)">⚠️ ${esc(N.err)}</p>` : ''}
+    <input type="search" id="nSearch" class="search" placeholder="Search notes, names, links…" value="${esc(N.q)}" aria-label="Search notes">
+    <div class="notes" id="nList">${notesListHtml()}</div></div>
+  <p class="hint">In WhatsApp (your own chat): <b>${esc(p)}note buy charger</b> · reply <b>${esc(p)}note</b> to any message, link or forward · <b>${esc(p)}notes</b> = last 10 · <b>${esc(p)}note delete 3</b>. Notes are saved encrypted with your password on the vr-notes branch of your repo, so nobody can read them there.</p>`;
+}
+async function addNote() {
+  const ta = $('#nNew');
+  const text = cleanNoteText(ta?.value || '');
+  if (!text) { toast('Write something first', 'bad'); ta?.focus(); return; }
+  await loadNotes(true);
+  if (N.list.length >= NOTES_LIMITS.maxNotes) throw new Error(`Max ${NOTES_LIMITS.maxNotes} notes — delete some first`);
+  const note = { v: 1, id: newNoteId(), text, from: 'me', kind: linksIn(text).length ? 'link' : 'text', at: Date.now(), by: 'panel' };
+  toast('Saving note (encrypted)…');
+  await napi.add(note);
+  N.draft = '';
+  await loadNotes(true);
+  rerender();
+  toast('Note saved ✓', 'ok');
+}
+async function deleteNote(id) {
+  const n = N.list.find((x) => x.id === id);
+  if (!n || !confirm(`Delete this note?\n\n“${notePreview(n, 80)}”`)) return;
+  await napi.del(n);
+  N.list = N.list.filter((x) => x.id !== id);
+  rerender();
+  toast('Note deleted', 'ok');
+  loadNotes(true).then(() => { if (location.hash === '#/notes') rerender(); });
+}
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); }
+  catch {
+    const ta = document.createElement('textarea'); ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); const ok = document.execCommand('copy'); ta.remove();
+    if (!ok) throw new Error('Could not copy — long-press the text instead');
+  }
+  toast('Copied ✓', 'ok');
+}
+
+/* ---------------- 🎨 appearance (looks are saved on THIS phone only: panel/theme.js) ---------------- */
+const TH = () => globalThis.VRTheme;
+function themeLabel() {
+  const T = TH(); if (!T) return 'Classic';
+  const c = T.current(), t = T.byId[c.theme];
+  const m = t.modes.find((x) => x.id === c.mode);
+  return `${t.name}${t.modes.length > 1 && m ? ` · ${m.label.replace(/^\S+\s/, '')}` : ''}`;
+}
+function setTheme(o) { const T = TH(); if (!T) return; T.set(o); }
+function themePreview(t, on) {
+  const T = TH();
+  const v = T.read(), choice = v.modes[t.id] || '';
+  const mode = T.resolve(t.id, choice);
+  return `<button type="button" class="tp" data-act="theme" data-v="${t.id}" aria-pressed="${on}" aria-label="${esc(t.name)}${on ? ' (in use)' : ''}">
+    <span class="tp-stage" data-theme="${t.id}" data-mode="${mode}" aria-hidden="true">
+      <span class="tp-bar"><b>VR Bot</b><i></i></span>
+      <span class="card" style="display:block"><span class="tp-h2">Today</span>
+        <span class="tp-line"><span>Good morning Amma</span><span class="tg"><span class="tp-tg on"></span></span></span>
+        <span class="tp-input">Type a note…</span>
+        <span class="tp-btns"><span class="btn primary">Save</span><span class="btn">Cancel</span></span></span>
+    </span>
+    <span class="tp-name"><span aria-hidden="true">${t.icon}</span><span>${esc(t.name)}<small>${esc(t.desc)}</small></span>${on ? '<span class="on" aria-hidden="true">✓</span>' : ''}</span>
+  </button>`;
+}
+function renderAppearance() {
+  const T = TH();
+  if (!T) { view().innerHTML = '<button class="back" data-act="back">‹ More</button><p class="empty">Themes could not load — pull down to refresh.</p>'; return; }
+  const c = T.current(), t = T.byId[c.theme];
+  const opts = [...(T.hasAuto(t) ? [{ id: 'auto', label: '📱 Auto' }] : []), ...t.modes];
+  const modeSeg = t.modes.length > 1 ? `<div class="card"><h2>${esc(t.name)} — ${T.hasAuto(t) ? 'light or dark' : 'style'}</h2>
+    <div class="seg" role="group" aria-label="Light or dark">${opts.map((m) => `<button type="button" data-act="theme-mode" data-v="${m.id}" aria-pressed="${c.choice === m.id}">${esc(m.label)}</button>`).join('')}</div>
+    ${T.hasAuto(t) ? '<p class="hint">Auto follows your phone’s dark mode.</p>' : ''}</div>` : '';
+  view().innerHTML = `<button class="back" data-act="back">‹ More</button>
+  <div class="ph"><div><h1>🎨 Appearance</h1><p>Tap a look — it changes right away. Saved on this phone only.</p></div></div>
+  ${modeSeg}
+  <div class="tp-grid">${T.THEMES.map((x) => themePreview(x, x.id === c.theme)).join('')}</div>
+  <p class="hint" style="margin-top:12px">Each phone keeps its own look. Nothing is saved to GitHub, so the bot is not affected.</p>`;
+}
+
 /* ---------------- router ---------------- */
 const routes = [
   [/^#\/home$/, renderHome, 'home'], [/^#\/schedules$/, renderSchedules, 'schedules'], [/^#\/schedule\/(.+)$/, renderScheduleEditor, 'schedules'],
@@ -864,11 +1530,13 @@ const routes = [
   [/^#\/templates$/, renderTemplates, 'more'], [/^#\/template\/(.+)$/, renderTemplateEditor, 'more'],
   [/^#\/groups$/, renderGroups, 'more'], [/^#\/group\/(.+)$/, (id) => renderGroupEditor(decodeURIComponent(id)), 'more'],
   [/^#\/settings$/, renderSettings, 'more'], [/^#\/logs$/, renderLogs, 'more'], [/^#\/status$/, renderStatus, 'more'],
+  [/^#\/notify$/, renderNotify, 'more'], [/^#\/sent$/, renderSent, 'more'], [/^#\/voice$/, renderVoice, 'more'],
+  [/^#\/notes$/, renderNotes, 'more'], [/^#\/appearance$/, renderAppearance, 'more'],
 ];
 function route() {
   const h = location.hash || '#/home';
   if (h === '#/demo') { startDemo(); return; }
-  if (h === '#/logout') { localStorage.removeItem('vrbot.cfg'); localStorage.removeItem('vrbot.pass'); sessionStorage.clear(); S.cfg = null; S.pass = ''; S.demo = false; S.loaded = false; history.replaceState(null, '', '#/home'); renderLogin(); return; }
+  if (h === '#/logout') { localStorage.removeItem('vrbot.cfg'); localStorage.removeItem('vrbot.pass'); localStorage.removeItem('vrbot.notes.enc'); N.list = []; N.loaded = false; N.dec.clear(); sessionStorage.clear(); S.cfg = null; S.pass = ''; S.demo = false; S.loaded = false; history.replaceState(null, '', '#/home'); renderLogin(); return; }
   if (!S.loaded) { renderLogin(); return; }
   const prevId = D?._id;
   for (const [re, fn, tab] of routes) {
@@ -906,6 +1574,7 @@ async function onClick(e) {
   if (b.dataset.seg) {
     const f = b.dataset.seg, v = b.dataset.v;
     if (f === 'logTab') { logTab = v; renderLogs(); return; }
+    if (f === 'sentCat') { sentCat = v; renderSent(); return; }
     if (f === 'festYear') { festYear = Number(v); renderFestivals(); return; }
     if (D) { setPath(D, f, f === 'repeat.type' ? v : v); if (f === 'repeat.type') D.repeat = { type: v, ...(v === 'once' ? { date: localDate(Date.now(), tz()) } : v === 'weekly' ? { days: [1, 2, 3, 4, 5] } : v === 'monthly' ? { day: 1 } : v === 'yearly' ? { month: new Date().getMonth() + 1, day: new Date().getDate() } : v === 'dates' ? { dates: [] } : {}) }; rerender(); }
     return;
@@ -915,8 +1584,30 @@ async function onClick(e) {
   await guarded(async () => {
     switch (a) {
       case 'back': history.back(); break;
+      case 'v-rec': await recStart(); break;
+      case 'v-stop': recStop(); break;
+      case 'v-redo': recReset(); await recStart(); break;
+      case 'v-cancel': recReset(); REC.open = false; rerender(); break;
+      case 'v-save': await recSave(); break;
+      case 'v-new': REC.open = true; rerender(); break;
+      case 'v-play': await playClip(b.dataset.v); break;
+      case 'v-del': await deleteClip(b.dataset.v); rerender(); break;
+      case 'v-pick': { const c = V.list.find((x) => x.id === b.dataset.v); if (c && D) { D.voice = { clip: c.id, name: c.name }; rerender(); } break; }
+      case 'n-add': await addNote(); break;
+      case 'n-del': await deleteNote(b.dataset.v); break;
+      case 'n-copy': { const n = N.list.find((x) => x.id === b.dataset.v); if (n) await copyText(n.text || ''); break; }
+      case 'n-reload': toast('Refreshing…'); await loadNotes(true); rerender(); toast(N.err ? N.err : 'Up to date ✓', N.err ? 'bad' : 'ok'); break;
+      case 'theme': setTheme({ theme: b.dataset.v }); renderAppearance(); break;
+      case 'theme-mode': setTheme({ mode: b.dataset.v }); renderAppearance(); break;
+      case 'v-reload': toast('Refreshing…'); await loadVoices(true); rerender(); toast('Up to date ✓', 'ok'); break;
       case 'go': location.hash = b.dataset.v; break;
       case 'reload': toast('Refreshing…'); await loadAll(); rerender(); toast('Up to date ✓', 'ok'); break;
+      case 'sent-reload': toast('Refreshing…'); await Promise.all([loadAll(), readPushLog()]); rerender(); toast('Up to date ✓', 'ok'); break;
+      case 'push-enable': await enablePush(); D = null; rerender(); break;
+      case 'push-off': if (confirm('Stop notifications on this phone?')) { await disablePushHere(); D = null; rerender(); } break;
+      case 'push-test': await testPush(); break;
+      case 'push-rm': { const s = settings(); const d = (s.notify.devices || []).find((x) => x.id === b.dataset.id); if (!d || !confirm(`Remove ${d.name || 'this phone'}? It stops getting notifications.`)) break; if (d.endpoint === pushHere.endpoint) { await disablePushHere(); } else { s.notify.devices = s.notify.devices.filter((x) => x.id !== d.id); await save('settings', s); } D = null; rerender(); break; }
+      case 'notify-save': { const s = settings(); s.notify = { ...s.notify, enabled: !!D.enabled, kinds: { ...s.notify.kinds, ...D.kinds }, selfReports: !!D.selfReports }; await save('settings', s); D = null; rerender(); break; }
       case 'run-now': await api.dispatch({ action: 'run' }); toast('Started ✓ — the bot runs in 1–3 min', 'ok'); break;
       case 'pause': { const before = settings(); const s = settings(); s.paused = !s.paused; await save('settings', s); renderHome(); topStatus(); await kickIfResumed(before, s); break; }
       case 'rm-target': D.to.splice(Number(b.dataset.i), 1); rerender(); break;
@@ -929,10 +1620,12 @@ async function onClick(e) {
         if (!D.name.trim()) throw new Error('Give it a name');
         if (!isValidTime(D.time)) throw new Error('Pick a time');
         if (!(D.to || []).length) throw new Error('Add at least one recipient');
-        if (!D.templateId && !D.message.trim()) throw new Error('Write a message or pick a template');
+        const hasMsg = () => !!(D.templateId || D.message.trim());
+        if ((D._vmode || 'text') === 'text' && !hasMsg()) throw new Error('Write a message or pick a template');
         if (D.repeat.type === 'weekly' && !(D.repeat.days || []).length) throw new Error('Pick at least one weekday');
         if (a === 'sch-now' && !confirm(`Send "${D.name}" to ${(D.to || []).length} recipient(s) right now?`)) break;
         const item = strip(D); if (!item.start) item.start = null; if (!item.end) item.end = null;
+        applyVoice(item, hasMsg);
         await saveList('schedules', 'schedules', replaceIn(schedules(), item));
         if (a === 'sch-save') { D = null; location.hash = '#/schedules'; }
         else { await api.dispatch({ action: a === 'sch-test' ? 'test-send' : 'send-now', target: item.id }); toast(a === 'sch-test' ? 'Test started ✓ — check your WhatsApp in 1–3 min' : 'Sending ✓ — goes out in 1–3 min', 'ok'); D._id = item.id; if (location.hash !== `#/schedule/${item.id}`) history.replaceState(null, '', `#/schedule/${item.id}`); }
@@ -970,21 +1663,23 @@ async function onClick(e) {
       }
       case 'ex-add': D.ai.examples = [...(D.ai.examples || []), { them: '', me: '' }]; await save('settings', strip(D)); rerender(); break;
       case 'ex-rm': D.ai.examples.splice(Number(b.dataset.i), 1); await save('settings', strip(D)); rerender(); break;
-      case 'busy-dur': busyDur = b.dataset.v; rerender(); break;
+      case 'busy-dur': modeDur[b.dataset.mode || 'busy'] = b.dataset.v; rerender(); break;
       case 'busy-on': case 'busy-off': {
-        const now = Date.now();
+        const now = Date.now(), mode = b.dataset.mode || 'busy', M = MODES[mode];
         let until = 0;
         if (a === 'busy-on') {
-          if (busyDur === 'until') {
-            const v = $('#busyUntil')?.value; if (!isValidTime(v)) throw new Error('Pick the time you are back');
+          if (modeDur[mode] === 'until') {
+            const v = $(`#${mode}Until`)?.value; if (!isValidTime(v)) throw new Error(mode === 'class' ? 'Pick the time class ends' : 'Pick the time you are back');
             const today = localDate(now, tz());
             const at = (d) => zonedToUtc(d, v, tz());
             until = at(today) > now ? at(today) : at(localDate(now + 86400000, tz()));
-          } else until = now + Number(busyDur) * 60000;
+          } else until = now + Number(modeDur[mode]) * 60000;
+          // only one mode at a time: switching this one on switches the other one off
+          for (const m of Object.keys(MODES)) if (m !== mode && busyNow(D, status(), now, m).on) D[m] = { ...(D[m] || {}), on: false, until: 0, setAt: now };
         }
-        D.busy = { ...(D.busy || {}), on: a === 'busy-on', until, setAt: now };
+        D[mode] = { ...(D[mode] || {}), on: a === 'busy-on', until, setAt: now };
         const after = strip(D); await save('settings', after); topStatus();
-        toast(a === 'busy-on' ? `Busy until ${busyTimeText(until, now, tz())} ✓ — the bot picks it up within a few minutes` : 'Busy mode off ✓', 'ok');
+        toast(a === 'busy-on' ? `${M.name} until ${busyTimeText(until, now, tz())} ✓ — the bot picks it up within a few minutes` : `${M.name} mode off ✓`, 'ok');
         rerender(); break;
       }
       case 'st-days': D.autoStatus.days = b.dataset.v === 'all' ? [0, 1, 2, 3, 4, 5, 6] : [1, 2, 3, 4, 5]; rerender(); break;
@@ -1004,15 +1699,18 @@ async function onClick(e) {
         rerender(); break;
       }
       case 'wk-test': await save('settings', strip(D)); await api.dispatch({ action: 'test-send', target: '@report' }); toast('Started ✓ — the report reaches your WhatsApp in 1–3 min', 'ok'); break;
-      case 'settings-save': { const before = settings(); const after = strip(D); await save('settings', after); topStatus(); await kickIfResumed(before, after); break; }
+      case 'settings-save': { const before = settings(); const after = strip(D); after.notify = before.notify; await save('settings', after); topStatus(); await kickIfResumed(before, after); break; }
       case 'gen-topic': { const t = 'vrbot-' + Array.from(crypto.getRandomValues(new Uint8Array(9)), (x) => x.toString(36).padStart(2, '0')).join('').slice(0, 16); D.alerts.form.ntfyTopic = t; $('#sNt').value = t; break; }
       case 'r-save': {
         if (!D.pattern.trim()) throw new Error('Add the words to match');
-        if (!(Array.isArray(D.reply) ? D.reply.length : String(D.reply || '').trim()) && !D.react) throw new Error('Write a reply or pick a reaction');
+        const hasText = () => (Array.isArray(D.reply) ? D.reply.length : String(D.reply || '').trim());
+        if ((D._vmode || 'text') === 'text' && !hasText() && !D.react) throw new Error('Write a reply or pick a reaction');
         const w = D.where || 'private';
         if (w !== 'groups' && D._people === 'pick' && !(D.contacts || []).length && !(D.tags || []).length) throw new Error('Pick at least one person or list, or choose Everyone');
         if (w !== 'private' && D._groups === 'pick' && !(D.groups || []).length) throw new Error('Pick at least one group, or choose All groups');
-        const item = strip(D); delete item._people; delete item._groups;
+        const item = strip(D); item.people = D._people === 'pick' ? 'pick' : 'all'; delete item._people; delete item._groups;
+        applyVoice(item, hasText);
+        if (item.cooldownMinutes === null || item.cooldownMinutes === '') delete item.cooldownMinutes;
         await saveList('rules', 'rules', replaceIn(rules(), item)); D = null; location.hash = '#/replies'; break;
       }
       case 'r-del': if (confirm('Delete this rule?')) { await saveList('rules', 'rules', rules().filter((x) => x.id !== D.id)); D = null; location.hash = '#/replies'; } break;
@@ -1043,7 +1741,13 @@ async function onClick(e) {
 document.addEventListener('click', onClick);
 document.addEventListener('submit', (e) => { if (e.target.id === 'ed') e.preventDefault(); });
 document.addEventListener('input', onField);
+document.addEventListener('input', (e) => { if (e.target.id === 'vName') REC.name = e.target.value; });
+document.addEventListener('input', (e) => {
+  if (e.target.id === 'nNew') N.draft = e.target.value;
+  if (e.target.id === 'nSearch') { N.q = e.target.value; const l = $('#nList'); if (l) l.innerHTML = notesListHtml(); }
+});
 document.addEventListener('change', async (e) => {
+  if (e.target.id === 'vFile') { const f = e.target.files?.[0]; e.target.value = ''; if (f) { recReset(); await recUse(f, f.name.replace(/\.[^.]+$/, '').replace(/[_-]+/g, ' ')); } return; }
   if (e.target.id === 'addTarget' && e.target.value && D) { D.to = D.to || []; addTargetFromSelect(e.target.value, D.to); rerender(); return; }
   if (e.target.dataset.act === 'fest-default') { await guarded(async () => { const fc = clone(festCfg()); fc.defaultTime = e.target.value || '00:00'; await save('festivals', fc); }); return; }
   if (e.target.dataset.act === 'sch-enable' || e.target.dataset.act === 'bd-noyear') return; // handled on click
@@ -1065,5 +1769,12 @@ async function boot() {
 }
 $('#year').textContent = new Date().getFullYear();
 window.addEventListener('hashchange', route);
-if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+  // tapping a notification while the panel is open → go to the Sent log and show the newest sends
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (!e.data?.go || !S.loaded) return;
+    if (location.hash !== e.data.go) location.hash = e.data.go; else rerender();
+  });
+}
 boot();

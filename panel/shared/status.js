@@ -57,6 +57,24 @@ export function statusAudience(cfg = {}, { contacts = [], recent = {}, owner = '
   return { numbers, jids: numbers.map(jidOf), total, capped: total > max, self: selfCount, nobody: numbers.length <= selfCount };
 }
 
+/**
+ * The same audience as statusAudience, as names for people to read: [{ n, name, recent }] — contact name, else
+ * the number; people who are not in Contacts (they only get it because they texted you lately) are marked
+ * recent. You (owner) are left out. recentKnown = false when the caller had no "who texted me" list (the panel).
+ */
+export function statusAudienceNames(cfg = {}, { contacts = [], recent = null, owner = '', nowMs = Date.now(), testOnly = false } = {}) {
+  const aud = statusAudience(cfg, { contacts, recent: recent || {}, owner, nowMs, testOnly });
+  const mine = new Set((Array.isArray(owner) ? owner : [owner]).map((n) => normalizeNumber(n)).filter(Boolean));
+  const byNum = new Map(contacts.filter((c) => c && c.number && !c.example).map((c) => [normalizeNumber(c.number), c]));
+  const people = [];
+  for (const n of aud.numbers) {
+    if (mine.has(n)) continue;
+    const c = byNum.get(n);
+    people.push(c ? { n, name: c.name || `+${n}` } : { n, name: `+${n}`, recent: true });
+  }
+  return { people, capped: aud.capped, total: aud.total - aud.self, recentIncluded: !!cfg.alsoRecent && (cfg.audience || 'all') !== 'only', recentKnown: !!recent };
+}
+
 /** Next background colour / font (rotating, or the fixed one picked in the panel). mem = memory.autoStatus */
 export function statusLook(cfg = {}, mem = {}) {
   let backgroundColor = cfg.color;

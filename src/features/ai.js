@@ -1,15 +1,26 @@
 // VR Bot — AI replies "in your style" using Groq's free API. © VR DEVELOPMENTS
 // Free plan (checked Oct 2026): openai/gpt-oss-120b → 30 requests/min, 1,000/day. Key: console.groq.com → API Keys.
 import { env } from '../env.js';
+import { DEFAULT_SETTINGS } from '../../panel/shared/defaults.js';
 
 const URL = 'https://api.groq.com/openai/v1/chat/completions';
 
+/** The facts the AI may use about you ("About you" in the panel). Missing → the default; cleared on purpose ('') → none. */
+export function aboutMeOf(ai = {}) {
+  return String(ai.aboutMe ?? DEFAULT_SETTINGS.ai.aboutMe ?? '').trim();
+}
+
 export function buildMessages(ai, myName, history, incomingText) {
-  const sys = [
-    ai.stylePrompt || `You reply to WhatsApp messages as ${myName}. Keep it short and natural.`,
+  const name = String(myName || '').trim() || 'me';
+  const facts = aboutMeOf(ai);
+  const sys = ai.plain ? [ai.stylePrompt] : [
+    ai.stylePrompt || `You reply to WhatsApp messages as ${name}. Keep it short and natural.`,
+    `You are ${name}, replying on WhatsApp as yourself.`,
+    facts ? `Facts about you (the ONLY true details about you):\n${facts}` : `Facts about you: only your name, ${name}.`,
+    'Your name and details are ONLY what is written in the facts. Never make up a name, age, college, business, place or number. If asked something not in the facts, say you\'ll tell them later.',
     'Rules: reply in 1–3 short lines like a real WhatsApp message. Match the language of the other person. No hashtags, no "As an AI". If you do not know something personal (plans, money, location), say you will reply properly later.',
-  ].join('\n');
-  const msgs = [{ role: 'system', content: sys }];
+  ];
+  const msgs = [{ role: 'system', content: sys.join('\n') }];
   for (const ex of ai.examples || []) {
     if (ex.them && ex.me) { msgs.push({ role: 'user', content: ex.them }); msgs.push({ role: 'assistant', content: ex.me }); }
   }

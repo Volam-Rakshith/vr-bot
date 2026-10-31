@@ -49,7 +49,13 @@ test('dry run: send once, auto-reply, encrypted state, no duplicates', { timeout
   assert.equal(save1.status, 0, save1.stdout + save1.stderr);
 
   const files = sh('git', ['--git-dir', origin, 'ls-tree', '--name-only', 'vr-state']).stdout.split('\n').filter(Boolean).sort();
-  assert.deepEqual(files, ['README.md', 'logs.json', 'memory.json', 'sentlog.json', 'status.json']);
+  assert.deepEqual(files, ['README.md', 'logs.json', 'memory.json', 'outbox.json', 'sentlog.json', 'status.json']);
+  // 📤 Sent log: both sends recorded with the contact's name and kind, encrypted like the rest
+  const outboxRaw = sh('git', ['--git-dir', origin, 'show', 'vr-state:outbox.json']).stdout;
+  assert.ok(!outboxRaw.includes('Ravi') && !outboxRaw.includes('Quote'), 'sent log must be encrypted');
+  const outbox = await decryptJSON(JSON.parse(outboxRaw), 'test-pass-123');
+  assert.deepEqual(outbox.entries.map((e) => [e.cat, e.to]).sort(), [['replies', 'Ravi Kumar'], ['scheduled', 'Ravi Kumar']]);
+  assert.ok(outbox.entries.some((e) => e.text === 'Hello Ravi!'));
   const sentlogRaw = sh('git', ['--git-dir', origin, 'show', 'vr-state:sentlog.json']).stdout;
   assert.ok(!sentlogRaw.includes('Ravi'), 'state must be encrypted');
   const sentlog = await decryptJSON(JSON.parse(sentlogRaw), 'test-pass-123');

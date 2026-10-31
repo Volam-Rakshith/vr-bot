@@ -20,7 +20,11 @@
    │                        7. save step (always): encrypt + force-push vr-state
    │                        8. chain step (always): start the next run unless one is already waiting
    │                      Actions "VR Bot — Watchdog" (cron 7,27,47): start a run if none is alive
-   └──── reads (encrypted) ◄── vr-state branch: status, sentlog, logs, memory, session
+   ├──── reads (encrypted) ◄── vr-state branch: status, sentlog, logs, memory, session
+   └──── voice clips (encrypted) ◄─► vr-voice branch: voice/<id>.meta.json + voice/<id>.audio.json
+                                    (panel writes via the GitHub API, the bot via `!voice save`)
+   └──── notes (encrypted) ◄─► vr-notes branch: notes/<id>.json, one file per note
+                                    (panel writes via the GitHub API, the bot via `!note`; append-only commits, never force-pushed)
 ```
 
 ## Exact timing

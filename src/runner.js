@@ -9,6 +9,10 @@ import { Incoming } from './incoming.js';
 import { MediaSaver } from './features/media.js';
 import { githubWatch, ntfyPoll, dispatchAlert } from './features/alerts.js';
 import { summaryText } from './features/summary.js';
+import { Notifier } from './features/push.js';
+import { VoiceLibrary } from './features/voice.js';
+import { NotesBook } from './features/notes.js';
+import { voicePlan, pttContent, voiceLabel } from '../panel/shared/voice.js';
 import { postStatus, weeklyReportText } from './features/autostatus.js';
 import { describeStatusResult } from './statuspost.js';
 import { statusAudience } from '../panel/shared/status.js';
@@ -37,7 +41,9 @@ export async function run({ inbox = [] } = {}) {
   log.info(`VR Bot run started (${rec.trigger}). Timezone ${S0.timezone}, look-ahead ${T.lookaheadMinutes} min.`);
   log.endGroup();
 
+  let notifier = null;
   const finish = async (code) => {
+    if (notifier) await notifier.flush().catch(() => {}); // last notifications go out before the run ends
     rec.endedAt = Date.now();
     rec.ok = code === 0;
     state.status.lastRun = rec;
@@ -63,28 +69,47 @@ export async function run({ inbox = [] } = {}) {
   const wa = env.fakeWA ? new FakeWA({ handlers, inbox }) : new WA({ authDir: AUTH_DIR, handlers });
 
   /** low-level send used by everything; records ids so we never react to our own messages */
+  // 🔔 phone notifications + 📤 Sent log (src/features/push.js). Never blocks or breaks a send.
+  notifier = new Notifier({ getData, state, me: () => { try { return wa.me(); } catch { return ''; } }, owner: env.ownerNumber });
+  await notifier.checkTest();
   const send = async (jid, content, opts = {}) => {
-    const { kind, ...rest } = opts;
+    const { kind, cat, to, label, clip, ...rest } = opts;
     const r = await wa.send(jid, content, rest);
     if (r?.key?.id) state.memory.sentIds.push(r.key.id);
+    if (jid !== 'status@broadcast') notifier.sent(jid, content, { kind, cat, to, label, clip });
     return r;
+  };
+  // 🎙️ your voice clips (encrypted on the vr-voice branch, src/features/voice.js)
+  const voices = new VoiceLibrary({ passphrase: env.passphrase });
+  /** Send a schedule's voice clip as a real voice note. Throws when the clip is missing (so the send is retried / reported). */
+  const sendVoice = async (jid, item, opts = {}) => {
+    const v = voicePlan(item);
+    if (!v.voice) return false;
+    const clip = await voices.get(v.ref);
+    if (!clip) throw Object.assign(new Error(`voice clip "${v.ref.name || v.ref.clip}" is missing or not converted yet`), { permanent: !voices.find(v.ref) });
+    await send(jid, pttContent(clip.audio, clip.meta), { ...opts, kind: 'voice', label: voiceLabel(clip.meta.name), clip: clip.meta.name });
+    return true;
   };
   /** status posts: through wa.postStatus, which waits for WhatsApp's answer (src/statuspost.js) */
   const sendStatus = async (content, o = {}) => {
     const r = await wa.postStatus(content, { ...o, mem: state.memory });
     if (r?.id) state.memory.sentIds.push(r.id);
+    if (r?.state !== 'rejected') notifier.status(content, o.numbers || [], { label: r?.state === 'unknown' ? 'WhatsApp did not confirm' : '' });
     const note = describeStatusResult(r);
     if (r?.state === 'accepted') log.ok(`Status: ${note}${r.dropped ? ` — ${r.dropped} contact(s) left out (no WhatsApp id found)` : ''}`);
     else log.warn(`Status: ${note}`);
     state.status.statusPosts = [...(state.status.statusPosts || []), { at: Date.now(), state: r?.state, way: r?.variant || '', people: r?.people || 0, dropped: r?.dropped || 0, delivered: !!r?.delivered, tries: (r?.tries || []).map((t) => `${t.variant}:${t.result}${t.error ? `:${t.error}` : ''}`) }].slice(-20);
     return r;
   };
-  const toOwner = async (text) => {
+  /** A message to your own chat. report: true → it is a report; when "Send reports to my own WhatsApp chat"
+   *  is off (and a phone gets notifications) it becomes a notification + Sent log entry instead. */
+  const toOwner = async (text, { report = false, title = 'report' } = {}) => {
+    if (report && !notifier.selfReports()) { notifier.report(text, title); return; }
     const n = env.ownerNumber || wa.me();
     if (!n) return;
     const S = getData().settings;
     const head = headerOn(S.header, 'alert');
-    await send(numberJid(n), { text: head ? `${S.header.text}\n${text}` : text }, { kind: 'alert' });
+    await send(numberJid(n), { text: head ? `${S.header.text}\n${text}` : text }, { kind: 'alert', to: { self: true } });
   };
 
   log.group('Connecting to WhatsApp');
@@ -95,6 +120,7 @@ export async function run({ inbox = [] } = {}) {
       const first = state.status.session?.status !== 'logged_out';
       state.status.session = { status: 'logged_out', at: Date.now() };
       log.error(e.message);
+      if (first) await notifier.critical('⚠️ VR Bot is logged out of WhatsApp', 'WhatsApp unlinked the bot. Open GitHub → Actions → "VR Bot — Pair WhatsApp" → Run workflow to link it again.');
       chainEnd(false, 'WhatsApp logged the bot out — pair again');
       return finish(first ? 1 : 0); // fail loudly once (GitHub emails you), then stay quiet until re-paired
     }
@@ -102,6 +128,7 @@ export async function run({ inbox = [] } = {}) {
     log.error(`Could not connect: ${e.message}`);
     // Try a fresh run a couple of times (WhatsApp hiccup), then leave it to the watchdog.
     state.status.connFails = (state.status.connFails || 0) + 1;
+    if (state.status.connFails === 3) await notifier.critical('⚠️ VR Bot can\'t connect to WhatsApp', `Tried 3 times: ${e.message}. The watchdog will keep trying; if it stays like this, open the panel.`);
     chainEnd(state.status.connFails <= 2, state.status.connFails <= 2 ? 'retry connecting' : 'could not connect 3 times in a row');
     return finish(1);
   }
@@ -110,7 +137,10 @@ export async function run({ inbox = [] } = {}) {
   log.ok(`Connected as ${maskNumber(wa.me())}`);
   log.endGroup();
 
-  incoming = new Incoming({ wa, getData, state, send, media });
+  const notes = new NotesBook({ passphrase: env.passphrase }); // 📝 !note — encrypted on the vr-notes branch, read only when you use !note/!notes
+  incoming = new Incoming({ wa, getData, state, send, media, notifier, voices, notes }); // first: messages that arrive on connect queue here
+  const usesVoice = (d) => [...(d.rules || []), ...(d.schedules || [])].some((x) => x && x.enabled !== false && voicePlan(x).voice);
+  if (usesVoice(data) && !getData().settings.paused) { await voices.refresh(); log.info(`${voices.list().length} voice clip(s) ready`); }
 
   // groups list for the panel (refreshed every 6 hours)
   if (!env.fakeWA && Date.now() - (state.status.groupsAt || 0) > 6 * 3600000) {
@@ -138,8 +168,8 @@ export async function run({ inbox = [] } = {}) {
     const alerts = first ? [...dispatchAlert()] : [];
     if (Sx.alerts.github?.enabled) { try { alerts.push(...await githubWatch(Sx.alerts.github, state.memory.github, Date.now())); } catch (e) { log.warn(`GitHub watcher: ${e.message}`); } }
     if (Sx.alerts.form?.enabled && Sx.alerts.form.ntfyTopic) { try { alerts.push(...await ntfyPoll(Sx.alerts.form.ntfyTopic, state.memory.ntfy)); } catch (e) { log.warn(`Website form check: ${e.message}`); } }
-    for (const a of alerts) { try { await toOwner(a); rec.sent++; } catch (e) { log.warn(`alert failed: ${e.message}`); } }
-    if (alerts.length) log.info(`Sent ${alerts.length} alert(s) to you`);
+    for (const a of alerts) { try { await toOwner(a, { report: true, title: 'alert' }); rec.sent++; } catch (e) { log.warn(`alert failed: ${e.message}`); } }
+    if (alerts.length) log.info(`Sent ${alerts.length} alert(s) to you${notifier.selfReports() ? '' : ' (as notifications)'}`);
   };
   await checkAlerts(true);
   let lastAlerts = Date.now();
@@ -186,7 +216,9 @@ export async function run({ inbox = [] } = {}) {
       if (env.action === 'test-send') {
         const r = rcpts[0] || { name: 'Test' };
         const body = renderTemplate(text0, varsFor(r), 'test');
-        await toOwner(`🧪 *Test of "${sch.name}"* — ${rcpts.length} recipient(s) would get:\n\n${body}`);
+        const vp = voicePlan(sch);
+        await toOwner(`🧪 *Test of "${sch.name}"* — ${rcpts.length} recipient(s) would get:${vp.voice ? `\n🎙️ voice clip "${vp.ref.name || 'clip'}" (below)` : ''}${!vp.voice || vp.text ? `\n\n${body}` : ''}`);
+        if (vp.voice) await sendVoice(numberJid(env.ownerNumber || wa.me()), sch, { cat: undefined, to: { self: true } }).catch((e) => toOwner(`⚠️ ${e.message}`));
         log.ok('Test message sent to you');
       } else {
         for (const r of rcpts) {
@@ -195,7 +227,9 @@ export async function run({ inbox = [] } = {}) {
             const kind = r.type === 'group' ? 'group' : rcpts.length > 1 ? 'broadcast' : 'personal';
             const head = headerOn(S.header, kind, sch.header, r.contact?.header);
             const body = renderTemplate(text0, varsFor(r), `now-${r.number || r.jid}`);
-            await send(jid, { text: head ? `${S.header.text}\n${body}` : body }, { kind });
+            const vp = voicePlan(sch);
+            if (vp.voice) await sendVoice(jid, sch, { cat: 'scheduled', to: { name: r.name, number: r.number } });
+            if ((!vp.voice || vp.text) && body.trim()) await send(jid, { text: head ? `${S.header.text}\n${body}` : body }, { kind, cat: 'scheduled', to: { name: r.name, number: r.number } });
             rec.sent++;
             if (rcpts.length > 1) await sleep(1000 * (S.broadcast.minGapSeconds + Math.random() * (S.broadcast.maxGapSeconds - S.broadcast.minGapSeconds)));
           } catch (e) { rec.failed++; log.warn(`send-now to ${who(r)} failed: ${e.message}`); }
@@ -256,9 +290,19 @@ export async function run({ inbox = [] } = {}) {
           jid = ex.jid || numberJid(job.to.number);
         }
         let text = job.dynamic === 'summary' ? summaryText(d, state, Date.now()) : job.dynamic === 'weekly' ? weeklyReportText(d, state, Date.now()) : job.text;
-        if (!text) throw Object.assign(new Error('message is empty'), { permanent: true });
-        if (job.header) text = `${Sx.header.text}\n${text}`;
-        await send(jid, { text }, { kind: job.kind });
+        const vp = voicePlan(job);
+        const to = { name: job.to.name, number: job.to.number, self: !!job.to.owner };
+        if (vp.voice) {
+          // 🎙️ voice clip first (as a real voice note, no header), then the text when "Voice clip + text"
+          if (!e.voiceDone) { await sendVoice(jid, job, { cat: job.to.owner ? undefined : 'scheduled', to }); e.voiceDone = true; ledger[job.key] = { ...e, s: 'retry', k: job.kind, label: job.label, voiceDone: true, n: e.n || 0 }; }
+          if (!vp.text || !String(text || '').trim()) text = '';
+          extra = ' · 🎙️ voice clip';
+        } else if (!text) throw Object.assign(new Error('message is empty'), { permanent: true });
+        if (text) {
+          if (job.header) text = `${Sx.header.text}\n${text}`;
+          if (job.to.owner && !notifier.selfReports()) { notifier.report(text, job.label); extra += ' · as a notification'; } // reports to you → phone notification
+          else await send(jid, { text }, { kind: job.kind, cat: job.to.owner ? undefined : 'scheduled', to });
+        }
       }
       const late = Date.now() - job.at;
       ledger[job.key] = { t: Date.now(), s: 'sent', k: job.kind, label: job.label + extra, to: job.to.type === 'group' ? job.to.name : (job.to.name || who(job.to)), at: job.at, lateSec: Math.round(late / 1000) };
@@ -269,11 +313,14 @@ export async function run({ inbox = [] } = {}) {
     } catch (err) {
       e.n = (e.n || 0) + 1;
       const final = err.permanent || e.n >= MAX_TRIES;
-      ledger[job.key] = { t: Date.now(), s: final ? 'failed' : 'retry', n: e.n, k: job.kind, label: job.label, to: job.to.name || who(job.to), at: job.at, err: err.message };
+      ledger[job.key] = { t: Date.now(), s: final ? 'failed' : 'retry', n: e.n, k: job.kind, label: job.label, to: job.to.name || who(job.to), at: job.at, err: err.message, ...(e.voiceDone ? { voiceDone: true } : {}) };
       log.warn(`Send failed (${job.kind} → ${who(job.to)}): ${err.message}${final ? '' : ' — will retry'}`, `Send failed: "${job.label}" → ${job.to.name || who(job.to)}: ${err.message}`);
       if (final) {
         rec.failed++;
-        if (Sx.features.failureAlerts && !job.to.owner) await toOwner(`❌ *Couldn't send* "${job.label}" to ${job.to.name || 'a contact'}: ${err.message}`).catch(() => {});
+        if (Sx.features.failureAlerts && !job.to.owner) {
+          await toOwner(`❌ *Couldn't send* "${job.label}" to ${job.to.name || 'a contact'}: ${err.message}`).catch(() => {}); // critical: always to your chat
+          await notifier.critical(`❌ VR Bot couldn't send to ${job.to.name || 'a contact'}`, `"${job.label}": ${err.message}`);
+        }
       }
     }
   };
@@ -291,7 +338,9 @@ export async function run({ inbox = [] } = {}) {
     if (now > deadline) { log.info('Reached max run time — handing over to the next run'); endWant = true; endReason = 'hand-over'; break; }
     if (now - lastRefresh > 4 * 60000) { // pick up panel edits made while we wait
       try { data_ = await loadData({ fresh: true }); } catch (e) { log.warn(`Could not refresh data: ${e.message}`); }
+      if (voices.loaded || usesVoice(data_)) await voices.refresh(); // clips added in the panel (and converts uploaded mp3/m4a once)
       lastRefresh = now;
+      await notifier.checkTest(); // "Send test notification" tapped in the panel
     }
     jobs = plan();
     const due = jobs.filter((j) => j.at <= Date.now() + 1000);
@@ -306,7 +355,7 @@ export async function run({ inbox = [] } = {}) {
     const onlineLongEnough = Date.now() - t0 >= T.minOnlineSeconds * 1000;
     if (alwaysOn()) {
       // WhatsApp connection lost for 3+ minutes → end; a fresh run reconnects cleanly.
-      if (wa.loggedOut) { endWant = false; endReason = 'WhatsApp logged the bot out — pair again'; break; }
+      if (wa.loggedOut) { endWant = false; endReason = 'WhatsApp logged the bot out — pair again'; await notifier.critical('⚠️ VR Bot is logged out of WhatsApp', 'WhatsApp unlinked the bot. Open GitHub → Actions → "VR Bot — Pair WhatsApp" → Run workflow to link it again.'); break; }
       if (!wa.open) { downSince = downSince || Date.now(); if (Date.now() - downSince > 3 * 60000) { log.warn('WhatsApp connection lost — handing over to a fresh run'); endWant = true; endReason = 'reconnect'; break; } } else downSince = 0;
       if (handoffDue({ now: Date.now(), t0, maxRunMs: T.maxRunMinutes * 60000, nextJobAt: next?.at })) { log.info('Handing over to the next run'); endWant = true; endReason = 'hand-over'; break; }
       if (Date.now() - lastAlerts > 10 * 60000) { lastAlerts = Date.now(); await checkAlerts(false); }
@@ -351,6 +400,7 @@ export async function run({ inbox = [] } = {}) {
     if (r.removed?.length) state.status.media = state.status.media.filter((m) => !r.removed.includes(m.path));
   }
   rec.received += await incoming.drain();
+  await notifier.flush().catch(() => {});
   await sleep(1500);
   await wa.close();
   log.ok(`Run finished: ${rec.sent} sent, ${rec.failed} failed, ${rec.received} received, ${Math.round((Date.now() - t0) / 1000)}s`);

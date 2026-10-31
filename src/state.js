@@ -1,4 +1,4 @@
-// VR Bot — the bot's own state: WhatsApp session, sent-log (dedupe ledger), logs, memory.
+// VR Bot — the bot's own state: WhatsApp session, sent-log (dedupe ledger), logs, memory, outbox (📤 Sent log).
 // Stored ENCRYPTED on the "vr-state" branch. While a run is alive it lives in .vr/ on the runner.
 // © VR DEVELOPMENTS
 import fs from 'node:fs';
@@ -8,14 +8,16 @@ import { encryptJSON, decryptJSON, isEnvelope } from '../panel/shared/crypto.js'
 import { fetchBranch, readFile, commitFiles } from './gitstate.js';
 import { log } from './log.js';
 import { pruneWeekly } from '../panel/shared/report.js';
+import { pruneSent } from '../panel/shared/notify.js';
 
-export const STATE_FILES = ['status', 'sentlog', 'logs', 'memory'];
+export const STATE_FILES = ['status', 'sentlog', 'logs', 'memory', 'outbox'];
 
 export function emptyState() {
   return {
     status: { session: { status: 'never_paired' }, lastRun: null, runs: [], groups: [], away: null, inbox: { date: null, people: {} }, media: [], nextPlanned: [], heartbeatAt: null },
     sentlog: { entries: {} },
     logs: { entries: [] },
+    outbox: { entries: [] }, // 📤 Sent log: everything the bot sent (panel → More → Sent log)
     memory: { cooldowns: {}, ai: {}, aiCount: {}, lastIn: {}, lastOut: {}, followed: {}, awaySent: {}, github: {}, ntfy: {}, processed: [], warns: {}, pdf: {}, broadcast: { date: null, n: 0 }, sentIds: [], lastPollAt: 0 },
   };
 }
@@ -95,6 +97,7 @@ export function prune(st) {
   const e = st.sentlog.entries || {};
   for (const [k, v] of Object.entries(e)) if ((v.t || 0) < cutoff) delete e[k];
   st.logs.entries = (st.logs.entries || []).slice(-500);
+  if (st.outbox) pruneSent(st.outbox); // last 300 sends, max 14 days
   st.status.runs = (st.status.runs || []).slice(-60);
   st.status.media = (st.status.media || []).slice(-300);
   if (st.status.weekly) pruneWeekly(st.status.weekly, new Date().toISOString().slice(0, 10)); // counts only, last 15 days

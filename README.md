@@ -27,13 +27,17 @@ GitHub Actions does the work · GitHub Pages hosts your phone control panel.</p>
 | 📸 | **Auto status** — posts a WhatsApp text status (built-in motivational quotes with no repeats, AI-fresh lines, your own texts, or a photo link) on chosen days at a set time, to all / only these / all except these. Off by default | Exact minute |
 | 🎉 | **Special days** — on festivals and special days (Sankranti, Ugadi, Eid, Bathukamma, Diwali, Independence Day, Teachers' Day, World Savings Day… 33 days, exact dates for 2026–2027) the auto status is a ready-made picture card with a caption instead of the quote. Turn any day off or change its caption; still one status a day. On whenever Auto status is on | Exact minute |
 | 🔕 | **Busy mode** — `!busy 2h`, `!busy until 5pm`, `!busy off` or the panel switch: "VR's busy, back by 5:00 PM 🙏" once per chat, **only in the chats/groups you pick**; turns off by itself and tells you | Within seconds (Always on) |
+| 🎓 | **Class mode** — `!class 2h`, `!class till 4`, `!class` (1 hour) or the panel switch: "in class rn, will text after 4" once per chat, same chats as busy mode (or your own pick). Only one of busy/class is on at a time; `!free` turns off either | Within seconds (Always on) |
 | 🧸 | **Stickers & GIFs ignored** — auto-replies, AI, away and busy never react to stickers, GIFs, reactions, deleted messages or polls (switch in Replies) | — |
 | 🔔 | **Alerts to you** — GitHub stars/forks/issues/PRs + website contact form | Within seconds (Always on) |
-| ⚡ | **Auto-reply rules** — exact / contains / starts-with / regex, global or per tag, cooldown | Within seconds (Always on) |
+| ⚡ | **Auto-reply rules** — whole words / contains / exact / starts-with / regex, global or per tag, cooldown | Within seconds (Always on) |
+| 🎙️ | **Your own voice notes** — record or upload clips (panel) or `!voice save` in WhatsApp; a keyword rule or a schedule sends one as a real voice note | Within seconds (Always on) |
 | 🧠 | **AI replies in your style** (Groq free API) — style prompt + example chats + memory | ⏱ Next check |
 | 🌙 | **Away mode** — message + optional night window, `!away` / `!back` from WhatsApp | ⏱ Next check |
 | 🛡️ | **Group tools** — welcome new members, anti-link (warn / delete / remove if admin), `!tagall`, `!rules` | ⏱ Next check |
 | ⌨️ | **Commands** — `!sticker` `!pdf` `!weather` `!help` `!yt` (experimental) | ⏱ Next check |
+| 📝 | **Notes** — `!note buy charger`, or reply `!note` to any message, link or forward to save it (with who sent it). `!notes` lists the last 10, `!note delete 3` removes one. Panel → More → 📝 Notes: search, open links, copy, delete, add | Within seconds (Always on) |
+| 🎨 | **Panel looks** — More → 🎨 Appearance: Classic, Glassmorphism, Neumorphism, Claymorphism, Neo-Brutalism, Bento Grid, Skeuomorphism, Aurora, Retro Windows / Mac OS, Isometric, Kinetic type; light/dark where it fits. Saved on each phone | Instantly |
 | 🎤 | **Voice note → text** (Groq Whisper, free) | ⏱ Next check |
 | 💾 | **Save incoming media / statuses** (small files, encrypted) | ⏱ Next check |
 
@@ -79,11 +83,13 @@ GitHub Pages is free only for **public** repos, and Actions minutes are free and
 | Your settings, contacts, schedules… | `data/*.json` on `main` (encrypted) | The panel edits them through the GitHub API |
 | WhatsApp session, sent-log, logs, memory | `vr-state` branch (encrypted, one commit, force-pushed each run) | Never expires (Actions cache/artifacts do), atomic, panel can read it, repo doesn't grow. The previous session is kept as `session.prev.json` |
 | Saved media | `vr-media` branch (encrypted, ≤ 3 MB per file, 300 MB total, oldest dropped) | Runners are wiped after every run |
+| Notes | `vr-notes` branch (one encrypted file per note) | `vr-state` is rewritten by every run, so a note the panel adds there could be wiped; one file per note lets the panel and the bot save at the same moment |
+| Voice clips | `vr-voice` branch (encrypted audio + encrypted name, ≤ 60 s / 1 MB each) | Panel and bot both add clips there without touching `main`, so your repo stays small and no edit conflicts |
 
 ## ⌨️ Commands (in WhatsApp)
 
 Everyone (switchable): `!help` · `!weather Hyderabad` · `!sticker` (on/reply to an image or short video) · `!pdf` (send images, then `!pdf`) · `!yt <link>` (experimental, off) · in groups: `!tagall <msg>` (admins) · `!rules`
-Only you (from your own phone or "Message yourself"): `!away <msg>` · `!back` · `!pause` · `!resume` · `!status` · `!text` (reply to a voice note) · `!busy 2h` / `!busy 30m` / `!busy until 5pm` / `!busy off`
+Only you (from your own phone or "Message yourself"): `!away <msg>` · `!back` · `!pause` · `!resume` · `!status` · `!text` (reply to a voice note) · `!busy 2h` / `!busy 30m` / `!busy until 5pm` / `!busy off` · `!class 2h` / `!class till 4` / `!class` (1 hour) · `!free` (ends busy or class) · `!voice save <name>` (reply to a voice note) / `!voice list` / `!voice play <name>` / `!voice delete <name>` · `!note <text>` (or reply `!note` to any message) / `!notes` / `!notes <word>` / `!note delete <n>`
 
 ## 🔔 Website contact form → WhatsApp
 

@@ -2,6 +2,7 @@
 // Pure ES module (no network), shared by the bot and the panel ("Next sends" on the dashboard).
 // © VR DEVELOPMENTS
 import { occurrencesBetween, jitterMs, seededRandom } from './scheduler.js';
+import { voicePlan } from './voice.js';
 import { renderTemplate, firstName, headerOn } from './templates.js';
 import { mergedFestivals, festivalDate } from './festivals.js';
 import { normalizeNumber } from './defaults.js';
@@ -64,7 +65,7 @@ export function buildJobs(data, fromMs, toMs) {
   const wideTo = toMs + MAX_JITTER_MIN * 60000;
   const tplText = (obj) => (obj.templateId && templates.find((t) => t.id === obj.templateId)?.text) || obj.message || '';
 
-  const addOccurrence = ({ kind, sourceId, label, occ, recipients, text, scheduleHeader, delayMin, extraVars = {}, dynamic = null }) => {
+  const addOccurrence = ({ kind, sourceId, label, occ, recipients, text, scheduleHeader, delayMin, extraVars = {}, dynamic = null, voice = null }) => {
     const isList = recipients.length > 1;
     let cumulative = 0;
     recipients.forEach((r, i) => {
@@ -83,7 +84,7 @@ export function buildJobs(data, fromMs, toMs) {
       if (at < fromMs || at >= toMs) return;
       const header = headerOn(s.header, k, scheduleHeader, r.contact?.header);
       const rendered = dynamic ? '' : renderTemplate(text, vars({ my_name: s.myName || '', ...extraVars }, r, occ.date, occ.time), key);
-      jobs.push({ key, kind: k, sourceId, label, at, nominal: occ.at, date: occ.date, time: occ.time, to: r, text: rendered, header, list: isList || !!r.viaTag, dynamic });
+      jobs.push({ key, kind: k, sourceId, label, at, nominal: occ.at, date: occ.date, time: occ.time, to: r, text: rendered, header, list: isList || !!r.viaTag, dynamic, ...(voice ? { voice } : {}) });
     });
   };
 
@@ -98,7 +99,7 @@ export function buildJobs(data, fromMs, toMs) {
       if (!recipients.length) continue;
       const delayMin = sch.humanDelay?.enabled ? Math.min(MAX_JITTER_MIN, sch.humanDelay.minutes ?? s.humanDelay?.minutes ?? 3) : 0;
       for (const occ of occurrencesBetween(sch, wideFrom, wideTo, tz)) {
-        addOccurrence({ kind: 'personal', sourceId: sch.id, label: sch.name || 'Scheduled message', occ, recipients, text: tplText(sch), scheduleHeader: sch.header, delayMin });
+        addOccurrence({ kind: 'personal', sourceId: sch.id, label: sch.name || 'Scheduled message', occ, recipients, text: tplText(sch), scheduleHeader: sch.header, delayMin, voice: voicePlan(sch).voice ? sch.voice : null });
       }
     }
   }

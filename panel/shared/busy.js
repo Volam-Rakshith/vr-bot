@@ -1,9 +1,12 @@
-// VR Bot — Busy mode: "!busy 2h", "!busy until 5pm", "!busy off" + the panel switch.
+// VR Bot — Busy & Class modes: "!busy 2h", "!class till 4", "!free" + the panel switches.
 // Pure ES module (bot + panel). © VR DEVELOPMENTS
 //
-// Two places can switch it on/off, the newest one wins:
-//   panel:    settings.busy = { on, until, setAt, message, who/contacts/tags/exclude/groups, groupsOnlyWhenTagged }
-//   WhatsApp: state.status.busy = { on, until, at, message }   (written by the bot when you send !busy)
+// Two modes share the same machinery (once per chat per session, scope, end notice); only ONE is on at a time:
+// switching one on switches the other off. For each mode (busy | class) two places can switch it on/off,
+// the newest one wins:
+//   panel:    settings.<mode> = { on, until, setAt, message, who/contacts/tags/exclude/groups, groupsOnlyWhenTagged }
+//             (class: who "same" = the same chats/groups as busy mode)
+//   WhatsApp: state.status.<mode> = { on, until, at, message }   (written by the bot when you send !busy / !class)
 import { zonedToUtc, localDate, localTime, addDays, pretty12, prettyDate } from './time.js';
 
 const MIN = 60000;
@@ -19,7 +22,7 @@ const UNIT = { h: 60, hr: 60, hrs: 60, hour: 60, hours: 60, m: 1, min: 1, mins: 
  *  "off", "stop", "end"  → switch off
  * Anything after the time is ignored ("!busy 2h exam" = 2 hours).
  */
-export function parseBusy(arg, nowMs, tz = 'Asia/Kolkata') {
+export function parseBusy(arg, nowMs, tz = 'Asia/Kolkata', cmd = '!busy') {
   const a = String(arg || '').trim().toLowerCase();
   if (!a) return { until: nowMs + BUSY_DEFAULT_MINUTES * MIN, minutes: BUSY_DEFAULT_MINUTES };
   if (/^(off|stop|end|no|done|cancel|free)\b/.test(a)) return { off: true };
@@ -31,7 +34,7 @@ export function parseBusy(arg, nowMs, tz = 'Asia/Kolkata') {
   if (n) {
     minutes = Math.round(minutes);
     if (minutes < 1) return { error: 'That is less than a minute.' };
-    if (minutes > BUSY_MAX_MINUTES) return { error: 'Busy mode can be on for at most 7 days.' };
+    if (minutes > BUSY_MAX_MINUTES) return { error: 'It can be on for at most 7 days.' };
     return { until: nowMs + minutes * MIN, minutes };
   }
 
@@ -59,19 +62,52 @@ export function parseBusy(arg, nowMs, tz = 'Asia/Kolkata') {
     const minutes = Math.round(Number(bare[1]) * 60);
     if (minutes >= 1 && minutes <= BUSY_MAX_MINUTES) return { until: nowMs + minutes * MIN, minutes };
   }
-  return { error: 'Try: !busy 2h · !busy 30m · !busy until 5pm · !busy off' };
+  return { error: `Try: ${cmd} 2h · ${cmd} 30m · ${cmd} until 5pm · ${cmd} off` };
 }
 
-/** Which busy switch is in force right now (the newest of panel and !busy wins). */
-export function busyNow(settings = {}, status = {}, nowMs = Date.now()) {
-  const p = settings.busy || {};
-  const c = status.busy || null;
+/** The modes, in one place. short = {time} as "4" / "4:30" instead of "4:00 PM". */
+export const MODES = {
+  busy: { key: 'busy', icon: '🔕', name: 'Busy', short: false, message: "I'm busy right now, back by {time} 🙏" },
+  class: { key: 'class', icon: '🎓', name: 'Class', short: true, message: 'in class rn, will text after {time}' },
+};
+export const MODE_KEYS = Object.keys(MODES);
+
+/** Which switch of ONE mode is in force right now (the newest of panel and WhatsApp wins). */
+export function busyNow(settings = {}, status = {}, nowMs = Date.now(), mode = 'busy') {
+  const p = settings[mode] || {};
+  const c = status[mode] || null;
   const pAt = Number(p.setAt) || 0, cAt = Number(c?.at) || 0;
   const src = c && cAt > pAt
     ? { on: !!c.on, until: Number(c.until) || 0, at: cAt, source: 'whatsapp', message: c.message }
     : { on: !!p.on, until: Number(p.until) || 0, at: pAt, source: 'panel', message: '' };
   const active = src.on && src.until > nowMs;
-  return { active, on: src.on, until: src.until, at: src.at, source: src.source, id: `${src.source}:${src.at}`, message: src.message || p.message || '' };
+  const id = mode === 'busy' ? `${src.source}:${src.at}` : `${mode}:${src.source}:${src.at}`; // busy keeps its old id
+  return { mode, active, on: src.on, until: src.until, at: src.at, source: src.source, id, message: src.message || p.message || MODES[mode]?.message || '' };
+}
+
+/** The mode in force right now: busy or class (if both somehow are, the newest switch wins). Inactive → { active: false, mode: null }. */
+export function modeNow(settings = {}, status = {}, nowMs = Date.now()) {
+  let best = null;
+  for (const m of MODE_KEYS) {
+    const b = busyNow(settings, status, nowMs, m);
+    if (b.active && (!best || b.at > best.at)) best = b;
+  }
+  return best || { mode: null, active: false, on: false, until: 0, at: 0, source: '', id: '', message: '' };
+}
+
+/** "4", "4:30", "tomorrow 9" — the short way to say a time (class mode). */
+export function shortTimeText(untilMs, nowMs, tz = 'Asia/Kolkata') {
+  const [h, m] = localTime(untilMs, tz).split(':').map(Number);
+  const t = `${h % 12 || 12}${m ? `:${String(m).padStart(2, '0')}` : ''}`;
+  const d = localDate(untilMs, tz), today = localDate(nowMs, tz);
+  if (d === today) return t;
+  if (d === addDays(today, 1)) return `tomorrow ${t}`;
+  return `${prettyDate(d).replace(/ \d{4}$/, '')}, ${t}`;
+}
+
+/** The time as this mode says it: busy "5:00 PM", class "5". */
+export function modeTimeText(mode, untilMs, nowMs, tz) {
+  return MODES[mode]?.short ? shortTimeText(untilMs, nowMs, tz) : busyTimeText(untilMs, nowMs, tz);
 }
 
 /** "5:00 PM", "tomorrow 9:00 AM" or "Mon 3 Nov, 9:00 AM" — for "back by {time}". */
@@ -83,8 +119,14 @@ export function busyTimeText(untilMs, nowMs, tz = 'Asia/Kolkata') {
   return `${prettyDate(d).replace(/ \d{4}$/, '')}, ${t}`;
 }
 
-/** The auto-reply text with {time} filled in. */
-export function busyText(template, untilMs, nowMs, tz) {
-  const tpl = String(template || "I'm busy right now, back by {time} 🙏");
-  return tpl.replace(/\{time\}/gi, busyTimeText(untilMs, nowMs, tz));
+/** The auto-reply text with {time} filled in (mode = busy | class). */
+export function busyText(template, untilMs, nowMs, tz, mode = 'busy') {
+  const tpl = String(template || MODES[mode]?.message || MODES.busy.message);
+  return tpl.replace(/\{time\}/gi, () => modeTimeText(mode, untilMs, nowMs, tz));
+}
+
+/** The settings block whose chats a mode uses (class with who "same" uses busy's). */
+export function modeScopeCfg(settings = {}, mode = 'busy') {
+  if (mode === 'class') { const c = settings.class || {}; if (!c.who || c.who === 'same') return settings.busy || {}; return c; }
+  return settings[mode] || {};
 }
