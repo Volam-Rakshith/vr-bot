@@ -1,23 +1,10 @@
 {
-  "_note": "Keys are WhatsApp group IDs (the panel lists your groups after the first run).",
-  "groups": {
-    "PICK-A-GROUP@g.us": {
-      "name": "AIML Class (example)",
-      "welcome": {
-        "enabled": true,
-        "message": "Welcome {name} to {group}! 👋 Please read the rules: send !rules"
-      },
-      "antiLink": {
-        "enabled": true,
-        "action": "warn",
-        "warnLimit": 3,
-        "allowDomains": [
-          "github.com",
-          "youtube.com"
-        ]
-      },
-      "rulesText": "1. Be respectful\n2. No spam or random links\n3. Only class-related messages",
-      "tagallAdminsOnly": true
-    }
-  }
+ "vrenc": 1,
+ "alg": "AES-256-GCM",
+ "kdf": "PBKDF2-SHA256",
+ "iter": 200000,
+ "salt": "5D5Iz5bihXMwGK4RBXJtoQ==",
+ "iv": "X8d1ES3m81IANHUE",
+ "z": 0,
+ "ct": "gOIiLnK41G7ezxBoIk/iSKo6uGixKV9sQkWmQrBcGTgWsX4+2RDVS4w1qUZgaXYzhlkJzvlluWKlJTppCQzkQMs5Ra/wvB3Z8aiByhKuKZvsx9ICA7FOmYPrpAXKVoK8K3RjwLvDBVP0OFfbPTFIDhDXfCRaloPxsslaXT/a2dleHXy1YmP0sbouEZJvoJLI+BaAqu0WtxdRsdltlmsJ47br+vXW3q/mEeEMEMvyhafz6nYkZntYyAT14jB+IoxXjPBayl6r6b99L4/VkRpCymH6G7mLKek4UhmdQ5egfFi/5v2cmYg7LmNEnSY9+ZmzZwbJm1KwMHJEfX3FDaYfRgBrYoZICOFJDA05Yw/nsyJAlKb1QIOxA+rewjZvHRJNiDE792GzXfS9hiSaEd9R9TuAhCzM7TGNE1kZ5YSAv4cYfeB0blsZrTptfu7gKrPJqE26OBi1/K6Vst2Sfeu1teskWzkLbBT/10OBPav0m7BZdemmbMw84/7beJw8+u0HlstLHzGIA/6iXPxmD+rpdqPxruBkL37CU1U9f9m0JLW43pV0CKvInXN06y/v5fBgrJ0T+1ukFiVkGGp3Ou7uO024fM+6d5B8du4aXCOdnWP6wHVZ9I+EBAOXcCgCD4fNFEjDfa26G3bQ99+GdUEnO57o5oem+2l5Ys6InbLzIMH0t/9unIbbfd88J5IJ8TNsAEWNErlOZqYf9adz6EmPi8kOXEOpCyBySnHNcbOvWCGM8dlvLHEqGt9aPz3AI0pLQ8kTAqyyLQTxaRzkGitxCHCkWrzrXLaQJaDWH/x45CsE5tMmRTl+XYLLG67wB7nNnyn0SarzNr3vZpBAv0kr72sAWI5ZksxP3Wmm24PlPxxyTi25s4y5CDY7qJU67zvWKrgaWj6eeuIO8lAfMgmfKzKMF9VPqcrN9ROXHCAaAE16N7gl0tXGoBai5PZfJbBe8WNL7icRP7YhHwTTObE5YGOhsQ/K7mtkDGfUUyBRB1W0AMlahdUISez5rJQt/D69JfTQYjpFFQ2avbLZzUBTPVQ="
 }
