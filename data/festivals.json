@@ -1,61 +1,10 @@
 {
-  "defaultTime": "00:00",
-  "items": {
-    "diwali": {
-      "enabled": true,
-      "time": "07:00",
-      "to": [
-        {
-          "type": "tag",
-          "tag": "family"
-        },
-        {
-          "type": "tag",
-          "tag": "friends"
-        }
-      ],
-      "message": "Happy Diwali {first_name|}! 🪔 May the festival of lights fill your home with happiness. — {my_name}"
-    },
-    "new-year": {
-      "enabled": true,
-      "time": "00:00",
-      "to": [
-        {
-          "type": "tag",
-          "tag": "friends"
-        }
-      ],
-      "message": "Happy New Year {first_name|}! 🎆 Have an amazing {year} ✨"
-    },
-    "sankranti": {
-      "enabled": true,
-      "time": "07:00",
-      "to": [
-        {
-          "type": "tag",
-          "tag": "family"
-        }
-      ],
-      "message": "Happy Sankranti {first_name|}! 🪁"
-    }
-  },
-  "custom": [
-    {
-      "id": "vr-anniversary",
-      "name": "VR DEVELOPMENTS anniversary",
-      "emoji": "🚀",
-      "dates": {
-        "2027": "2027-06-01"
-      },
-      "enabled": false,
-      "time": "10:00",
-      "to": [
-        {
-          "type": "tag",
-          "tag": "clients"
-        }
-      ],
-      "message": "🚀 VR DEVELOPMENTS turns one today — thank you for being with us, {first_name|}!"
-    }
-  ]
+ "vrenc": 1,
+ "alg": "AES-256-GCM",
+ "kdf": "PBKDF2-SHA256",
+ "iter": 200000,
+ "salt": "5D5Iz5bihXMwGK4RBXJtoQ==",
+ "iv": "YcD8Zk/2hjwfoq8N",
+ "z": 0,
+ "ct": "Woc67XZgaOkIYfViBCy4Dyg3fXjuzkBaQbHS4b9wpz1MzqhWYxESHWqPYlCC6IMkOULgssh7v8vWEnhNwfVb3VoMgptrIhVhpbu1p3nsIWuAKoi1ux4qvezACFszQiIXR6xHcQPn8GH1BRHXPRicHKV5NUCJvpal4d6Bl7/WWX+rmsXcrqsa3eJwpYcHYmT+aMfK+uwuCTNUTZfV0EA6drkgnEfQksaku0Yq5/cCD4x5rG/fxXmRfV4Zs4sXtT4/8VcpZpB6jTB9sbuyUP79kcNHY15paBzteYRS2kXJWJspsl/KlgHaMUhqRFxfBERg2LtdTDnTJADaBNGeHzxkGx4k5/SYLIlXl9mQrNv2cOh8h4I42OgPX6O5w6J8x2YJKahC5x99v9dNQx/WJSdofgkmhQYEB6N/kZKvF4Y8IoefFBNrbxcvXc7nDw5t2yHLM/kIcg92KqyBAWvF3UsC4pD2vUMzhzsoycK23wLFBcCgoRdW+QGB07f6mCnM8lq63PGinULajXmAfUmILhRftvKcLa4YEIQ29lBMlX4AHKsCU7K273TSRtMrCPBddVhWLLFgAM+bgFUICDDqHDlg9YSzOeRL9WEyXmcvSmQ117FMFrrtTTVuwEJ+Cea6vWzHY2v0IeMAyBwrYnBysKxKIx++ACg3DMi+x3g1Zy/VR09thtM1kRWgNSmKNcqGrqyoY5ntmZFhejSntBUZeTkWjjawI2EcTs+h4/76euNhBjgYjnpmILYHgkA2JXMfhyw2rfgJuJZyf79A79Z/q1iKvUMUwmx8+NAWpXSPc2T5XsKvWiLXAPxQq4hGmMw/CO5O3Oadrm/N1Eq4v92dByX4/VBZR6MvCF7cHVXEu9RVBwJfCCoBs+BY2EUK1wqT1tjzyWxPCpwFOQUacpEPi98DnEdcPXb0gZM8AebifpDNZg6c1Gt98diLu2BwwQWQgOlig4sE3zeA9PbBo3zaW1arluFM/3luIl+To/RUx57k6vFsKkldAuTcdScAkpD5ev5sPcm4lS0mneJAgxghAmgK7RBotuH95v8HkKUzDX4JorRo4m+kxD8OiUbyszQbSFUdSZXj1fgDgVYzUqy3d0OFk6wp3SX7gIPZ+rJjHeVmoo2H8e0HdB0SrqNM8uSX"
 }
