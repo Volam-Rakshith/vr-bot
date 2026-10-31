@@ -1,33 +1,10 @@
 {
-  "rules": [
-    {
-      "id": "r_price",
-      "enabled": true,
-      "match": "contains",
-      "pattern": "price, cost, charges, rate",
-      "caseSensitive": false,
-      "reply": "Hi {first_name|}! 👋 Thanks for asking. Please share what you need (website / app / bot) and I'll send a quote soon. — VR DEVELOPMENTS",
-      "where": "private",
-      "contacts": [],
-      "tags": [],
-      "exclude": [],
-      "cooldownMinutes": 360
-    },
-    {
-      "id": "r_hi",
-      "enabled": false,
-      "match": "regex",
-      "pattern": "^(hi|hello|hey|hii+)\\b",
-      "caseSensitive": false,
-      "reply": [
-        "Hey! 👋",
-        "Hi {first_name|}! 😊"
-      ],
-      "where": "private",
-      "contacts": [],
-      "tags": [],
-      "exclude": [],
-      "cooldownMinutes": 720
-    }
-  ]
+ "vrenc": 1,
+ "alg": "AES-256-GCM",
+ "kdf": "PBKDF2-SHA256",
+ "iter": 200000,
+ "salt": "iPdrZf2u4B5lOZjy0SJvHg==",
+ "iv": "oofzmTzgYyxhgZXj",
+ "z": 0,
+ "ct": "6/LdVxk1y/yxIiInynoaMaldW5mHwhCzdKPJjACDUANcSz0hV9oBaNOl/fcy5/Dn1OKqfpiy6nLZ2b7Dx4P2/mjeVpIHZvxCTITtsrVaBYMen5p7zhzkkhEy7YG6VYKg1n+D8PVAWvXJqbf19+xfltgreKh3+sipP77skPMyspDvnMk2661X3PALrNAmGJ+2n+Wu2k/ZfbRky+ozicbvaWHumR/TaD4g/dcswbG4RtFrT+0OxmrwJjV/gpvvMvjvP4H42EwV3dohfGqQyWf0PnCc45bJItiG001auSB+tJjxy498DBgfGOZP3MDWMvhc7ucqMXpVBnuhpzmhRwScyhxmefJ0ykBLVVeJdztpaG+lK6lPEuaB8LQHEIgAAz4Zuu/d/GspFdjszAzPgxoTB6p0G2a9sQzMrg5yNBnf7O2HTiY7a59JBM7iWtvP5PGknUxmEojxe8t4Cx/0u7M7RJZdQk1tbDAoYKL0Qn913CwRanGk2272v86ZkenXGk9RPeS3ciVdkBORvRjfA7dZjnJ5ElfSMotkBRVenMfMDf/Ich1xTdOP0cc3ey1U03yaOJvJeJL8aOAO+Ddq/VEzp5TjXxmRXFe+4uISrou23BQ3TLV2jFCM+67EmM/T6KCFgbArGHRrK1rBRh07RRdbXKxza9F3KfAGTNhF9zxfq7EWvV4ApuSBpKeeEjsnJwtE5Pf0KC0iOio6mfrMEvAPT284VJfweuupBEQOkzizQyAwPYF8dJdH+LZBUq4SllYB2jakn3odnmb7MD6PrhiY+Lw+JtTo05HpV4pk7Z7sI7im"
 }
