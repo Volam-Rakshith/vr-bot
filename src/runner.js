@@ -39,6 +39,7 @@ export async function run({ inbox = [] } = {}) {
   const via = process.env.VR_VIA || '';
   const rec = { startedAt: t0, trigger: via === 'chain' ? 'always-on' : via === 'watchdog' ? 'watchdog' : env.eventName === 'workflow_dispatch' ? `manual:${env.action}` : env.eventName, sent: 0, failed: 0, received: 0, late: 0, notes: [] };
   log.info(`VR Bot run started (${rec.trigger}). Timezone ${S0.timezone}, look-ahead ${T.lookaheadMinutes} min.`);
+  state.status.groq = { key: !!env.groqKey, at: t0 }; // the panel shows "add the free Groq key" when false (never the key itself)
   log.endGroup();
 
   let notifier = null;

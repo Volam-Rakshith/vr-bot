@@ -1,8 +1,8 @@
 // VR Bot panel — offline shell cache + phone notifications. GitHub API calls are never cached. © VR DEVELOPMENTS
-const CACHE = 'vr-bot-v9';
+const CACHE = 'vr-bot-v11';
 const PUSHLOG = 'vr-bot-pushlog'; // last notifications, so the Sent log can show them before the bot saves
 const SHELL = ['./', 'index.html', 'styles.css', 'themes.css', 'theme.js', 'app.js', 'manifest.webmanifest', 'icons/logo.png', 'icons/icon-192.png',
-  'shared/time.js', 'shared/scheduler.js', 'shared/templates.js', 'shared/rules.js', 'shared/crypto.js', 'shared/festivals.js', 'shared/defaults.js', 'shared/planner.js', 'shared/quotes.js', 'shared/status.js', 'shared/busy.js', 'shared/report.js', 'shared/specialdays.js', 'shared/notify.js', 'shared/voice.js', 'shared/ogg.js', 'shared/notes.js', 'demo.js'];
+  'shared/time.js', 'shared/scheduler.js', 'shared/templates.js', 'shared/rules.js', 'shared/crypto.js', 'shared/festivals.js', 'shared/defaults.js', 'shared/planner.js', 'shared/quotes.js', 'shared/status.js', 'shared/busy.js', 'shared/report.js', 'shared/specialdays.js', 'shared/notify.js', 'shared/voice.js', 'shared/ogg.js', 'shared/notes.js', 'shared/botmode.js', 'shared/projects.js', 'demo.js'];
 self.addEventListener('install', (e) => { e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting())); });
 self.addEventListener('activate', (e) => { e.waitUntil(caches.keys().then((ks) => Promise.all(ks.filter((k) => k !== CACHE && k !== PUSHLOG).map((k) => caches.delete(k)))).then(() => self.clients.claim())); });
 self.addEventListener('fetch', (e) => {

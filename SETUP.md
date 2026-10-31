@@ -138,7 +138,16 @@ From now on the bot runs by itself, all day (Always on). You never need to touch
 2. GitHub → **Settings → Secrets and variables → Actions → New repository secret** → name `GROQ_API_KEY`, paste.
 3. Panel → **Replies** → turn on **AI replies**, write your style and 2–3 example chats → **Save replies**. Voice notes: **Settings → Voice note → text**.
 
-Free plan (checked Oct 2026): `openai/gpt-oss-120b` 30 requests/min, 1,000/day; Whisper 20 requests/min, 2,000/day.
+Free plan (checked Oct 31 2026, console.groq.com/docs/rate-limits): `openai/gpt-oss-120b` 30 requests/min, 1,000/day, 8K tokens/min, 200K tokens/day; `qwen/qwen3.8-27b` (reads photos) the same; Whisper 20 requests/min, 2,000/day.
+
+### 🤖 VR Bot mode (friends chat with the bot itself)
+
+Panel → **Replies → 🤖 VR Bot mode** → switch on → **Save replies**. Friends then start a message with **vr bot** (or your own trigger words):
+`hey vr bot explain black holes` · `vr bot tell a story` · `vr bot who is your boss?` · `vr bot summarise <link>` · photo + caption `vr bot what's this?` · `vr bot show me a pic of Charminar` · `vr bot draw a dragon in space`.
+It answers as "VR Bot 🤖, your assistant", talks about you only from **About you**, and never shares your number, location or plans. Daily limits per person and in total keep it inside Groq's free plan. Try it in your own chat first: send `vr bot hi` to yourself.
+Without the Groq key, real pictures, AI drawings (image.pollinations.ai, free), link titles and Wikipedia answers still work; chatting, web search and photo questions need the key.
+
+**📦 Your VR DEVELOPMENTS projects:** `vr bot show VR's projects` → your top 5 (+ `more` for all 15), `vr bot tell me about RepoDNA` → that one, and anyone VR Bot answers can send `!projects` / `!project <name>`. When a friend asks VR Bot about a matching topic (weather, code errors, recipes, exams, prompts, GitHub repos…), the answer ends with one line like "💡 btw VR built GeoWeather3D for this → link" — at most once per chat per project per day, never in your normal replies. Edit the list (name, one line, link, topics, order) and the promo switch in **Replies → 🤖 VR Bot mode → 📦 Projects**. The bot only ever talks about projects in that list. All of this works without the Groq key.
 
 ---
 

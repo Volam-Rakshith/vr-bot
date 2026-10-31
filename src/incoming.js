@@ -1,7 +1,7 @@
 // VR Bot — handles messages that arrived (while offline or during a run).
 // Auto-reply, AI, away, commands, group tools, voice→text, media save, follow-up tracking.
-// NOTE: GitHub Actions is not always-on, so these "instant" features reply on the next run
-// (up to ~30 minutes later) — or live, if a run happens to be connected at that moment.
+// With "Always on" (Settings → Timing, on by default) a run stays connected and answers within
+// seconds; with it off, GitHub wakes the bot about every 30 minutes and replies come on that check.
 // © VR DEVELOPMENTS
 import { getContentType, downloadMediaMessage, normalizeMessageContent, WAMessageStubType } from 'baileys';
 import { findRule, matchRule, pickReply, inScope, featureScope, pickReaction, REACTIONS, messageKind, shouldRespond, noiseText } from '../panel/shared/rules.js';
@@ -15,6 +15,9 @@ import { voicePlan, ruleCooldown, pttContent, parseVoiceCommand, voiceListText, 
 import { isJidGroup, jidNumber, numberJid } from './wa.js';
 import { log } from './log.js';
 import { aiReply, transcribe } from './features/ai.js';
+import { botCfg, botScope, detectTrigger, botIntent, botAllowed, botCount, GROQ_HELP, BOT_LIMITS } from '../panel/shared/botmode.js';
+import { answerBot } from './features/botmode.js';
+import { projectsOf, promoLine, projectsCommand, MORE_RE } from '../panel/shared/projects.js';
 import { weather, toSticker, imagesToPdf, ytAudio, helpText } from './features/commands.js';
 import { GroupTools } from './features/groups.js';
 import { env } from './env.js';
@@ -153,10 +156,15 @@ export class Incoming {
 
         if (it.fromMe) {
           if (isCmd && fresh) await this.command(it, S, F, true);
+          // 🤖 test VR Bot mode yourself: "vr bot …" in your own chat (no caps, any scope)
+          else if (fresh && it.selfChat && F.botMode) { const trig = this.botTrigger(it, S); if (trig) await this.botMode(it, data, trig, null); }
           continue;
         }
         if (!fresh) continue;
         if (isCmd && F.commands && (it.kind === 'message' || it.kind === 'gif')) { await this.command(it, S, F, isOwner); continue; }
+        // 🤖 VR Bot mode: "hey vr bot …" is for the bot itself (assistant persona). Comes before busy/class,
+        // keyword rules, away and the "as you" AI — a question asked TO the bot should get the bot's answer.
+        const botTrig = F.botMode ? this.botTrigger(it, S) : null;
         // Stickers, GIFs, polls and photos/videos without text get no reply, unless
         // Replies → "Also respond to stickers & GIFs" is on (then stickers & GIFs count as messages).
         const canReply = shouldRespond(it, { stickers: !!S.replies?.stickers });
@@ -164,6 +172,7 @@ export class Incoming {
         const busy = modeNow(S, this.state.status, now); // busy or class mode (only one is on at a time)
         if (it.isGroup) {
           if (F.groupTools && it.text) await this.tools().antiLink(it.msg, it.text, it.chat, it.senderJid).catch((e) => log.warn(`anti-link: ${e.message}`));
+          if (botTrig && await this.botMode(it, data, botTrig, busy)) continue;
           if (canReply && busy.active && await this.busyReply(it, S, busy, true)) continue;
           if (F.autoReply && canReply && it.text && await this.autoReply(it, data, true)) continue;
           if (F.ai && canReply && it.aiText && inScope(featureScope(S, 'ai'), sc) && this.talksToMe(it)) aiQueue.set(it.chat, it); // picked groups: only when @mentioned / replied to
@@ -172,6 +181,7 @@ export class Incoming {
         // private chat
         if (S.replies?.skipIfIReplied !== false && (mem.lastOut[it.senderNum] || 0) > it.ts) continue; // you already answered
         if (F.voiceToText && it.type === 'audioMessage' && inScope(featureScope(S, 'voice'), sc)) { await this.voice(it, S); continue; }
+        if (botTrig && await this.botMode(it, data, botTrig, busy)) continue;
         if (canReply && busy.active && await this.busyReply(it, S, busy, false)) continue;
         if (F.autoReply && canReply && it.text && await this.autoReply(it, data, false)) continue;
         if ((it.kind === 'message' || canReply) && isAwayActive(S, this.state.status, now) && inScope(featureScope(S, 'away'), sc)) { await this.away(it, S); continue; }
@@ -197,6 +207,100 @@ export class Incoming {
     if (it.selfChat) return { self: true };
     if (it.isGroup) return { name: (this.state.status.groups || []).find((g) => g.id === it.chat)?.name || 'a group' };
     return { name: it.contact?.name || it.msg?.pushName || '', number: it.senderNum || '' };
+  }
+
+  /** 🤖 Is this message addressed to the bot ("hey vr bot …", "@VR bot …")? → { question } or null. */
+  botTrigger(it, S) {
+    if (it.kind !== 'message' || !it.text) return null;
+    const ci = it.content?.[it.type]?.contextInfo || it.content?.extendedTextMessage?.contextInfo || {};
+    const mentionedMe = (ci.mentionedJid || []).some((j) => this.wa.isMe(j));
+    const t = detectTrigger(it.text, botCfg(S).triggers, { mentionedMe });
+    if (t.hit) return t;
+    // a plain "more" right after the bot sent the top-5 projects in this private chat → the full list
+    if (!it.isGroup && this.moreProjects(it) && MORE_RE.test(it.text.trim())) return { hit: true, question: it.text.trim(), trigger: 'more' };
+    return null;
+  }
+
+  /** Did the bot send the top-5 project list in this chat in the last 15 minutes? */
+  moreProjects(it) {
+    const at = this.state.memory.botMore?.[it.chat];
+    return !!at && Date.now() - at < 15 * 60000;
+  }
+
+  /** Send a bot-mode text (quoted, no header — the 🤖 marks it). Sent log kind "bot". */
+  async botSend(it, text) {
+    return this.send(it.chat, { text }, { quoted: it.msg, kind: 'bot', cat: 'ai', to: this.whoOf(it) });
+  }
+
+  /**
+   * 🤖 VR Bot mode: answer a question asked to the bot (assistant persona, links, web, pictures).
+   * Returns true when the bot owns the message (answered, or held back by a cap) → nothing else replies.
+   * Returns false outside its scope (or busy/class with "answer while busy" off) → the normal replies go on.
+   */
+  async botMode(it, data, trig, busy) {
+    const S = data.settings, cfg = botCfg(S), mem = this.state.memory, now = Date.now();
+    const owner = it.fromMe || (!!env.ownerNumber && it.senderNum === env.ownerNumber) || it.selfChat;
+    if (!owner && !inScope(botScope(S), scopeCtx(it))) return false;
+    if (!owner && busy?.active && cfg.inBusy === false) return false;
+    const day = localDate(now, S.timezone);
+    const person = it.senderNum || it.chat;
+    const who = it.contact?.name || it.msg?.pushName || maskNumber(it.senderNum);
+    // "more" right after the top-5 projects list: no AI, so no cooldown/cap (and it doesn't count)
+    const moreList = this.moreProjects(it) && MORE_RE.test(String(trig.question || '').trim());
+    if (!owner && !moreList) {
+      const ok = botAllowed(mem, cfg, { chat: it.chat, person, day, now });
+      if (!ok.ok) {
+        if (ok.reason === 'person' && ok.first) {
+          await this.botSend(it, `🤖 That's all my answers for you today (${cfg.perPersonPerDay}/day) 🙏 try again tomorrow!`);
+          await this.toOwner(`🤖 VR Bot mode: ${who} used all ${cfg.perPersonPerDay} bot answers for today.`, { report: true, title: 'VR Bot limit' }).catch(() => {});
+        }
+        if (ok.reason === 'global' && ok.first) await this.toOwner(`🤖 VR Bot mode reached today's total limit (${cfg.globalPerDay} answers). It stays quiet until tomorrow. Change it in Replies → 🤖 VR Bot mode.`, { report: true, title: 'VR Bot limit' }).catch(() => {});
+        log.info(`VR Bot mode: ${ok.reason === 'cooldown' ? 'cooling down' : 'daily limit'} for ${it.isGroup ? 'a group' : maskNumber(it.senderNum)}`);
+        return true;
+      }
+    }
+    // the photo: this message (caption "vr bot what's this") or the one it replies to
+    const quoted = this.quotedMsg(it);
+    const qc = quoted?.message ? normalizeMessageContent(quoted.message) : null;
+    const hasImage = it.type === 'imageMessage';
+    const quotedImage = !!qc?.imageMessage;
+    const imgMsg = hasImage ? it.content.imageMessage : qc?.imageMessage;
+    const intent = botIntent(trig.question, { hasImage, quotedImage, quotedText: textOf(qc), projects: projectsOf(S), moreProjects: this.moreProjects(it) });
+    const image = (hasImage || quotedImage) ? async () => {
+      if (Number(imgMsg?.fileLength || 0) > BOT_LIMITS.imageBytes * 3) throw new Error('photo too big');
+      return this.download(hasImage ? it.msg : quoted);
+    } : null;
+    const hk = `bot:${it.chat}`;
+    const hist = (mem.ai && mem.ai[hk]) || [];
+    const res = await answerBot({ S, cfg, intent, question: trig.question, history: hist, isGroup: it.isGroup, image, who: it.isGroup ? '' : firstName(it.contact?.name || it.msg?.pushName || '') });
+    if (!owner && !moreList) botCount(mem, { chat: it.chat, person, now });
+    // 💡 answered a question on one of VR's project topics → ONE "btw VR built … for this → link" line
+    // (only here in VR Bot mode — never in the normal "as VR" replies; max once per chat per project per day)
+    if (cfg.promo !== false && !res.error && ['chat', 'web', 'link', 'vision'].includes(intent.type) && trig.question) {
+      const outs = res.out || [];
+      const line = promoLine(mem, S, { question: trig.question, chat: it.chat, day, everyDays: cfg.promoEveryDays, answer: outs.map((o) => o.text || o.caption || '').join('\n') });
+      if (line) {
+        const last = [...outs].reverse().find((o) => o.text);
+        if (last) last.text = `${last.text}\n\n${line}`; else outs.push({ text: line });
+        res.out = outs;
+      }
+    }
+    mem.botMore = mem.botMore || {};
+    if (res.projectsList) mem.botMore[it.chat] = now; else if (intent.type === 'projects') delete mem.botMore[it.chat];
+    const said = [];
+    for (const o of res.out || []) {
+      if (o.image) { await this.send(it.chat, { image: o.image, mimetype: o.mimetype, caption: o.caption }, { quoted: it.msg, kind: 'bot', cat: 'ai', to: this.whoOf(it) }); said.push(o.caption); }
+      else if (o.text) { await this.botSend(it, o.text); said.push(o.text); }
+    }
+    mem.ai = mem.ai || {};
+    mem.ai[hk] = [...hist, { role: 'them', text: trig.question || '(hi)' }, { role: 'bot', text: said.join('\n').slice(0, 1500) }].slice(-20);
+    if (res.error) log.warn(`VR Bot mode: ${res.error}`);
+    if (res.noKey && mem.botKeyTold !== day) {
+      mem.botKeyTold = day;
+      await this.toOwner(`🤖 ${owner ? 'You' : who} asked VR Bot something, but its AI is off: the GROQ_API_KEY secret is missing. Pictures, drawings and Wikipedia answers still work.\n\n${GROQ_HELP}`, { report: true, title: 'VR Bot: add the free Groq key' }).catch(() => {});
+    }
+    log.info(`VR Bot mode (${intent.type}) answered ${owner ? 'you' : it.isGroup ? 'a group' : maskNumber(it.senderNum)}`);
+    return true;
   }
 
   /** Did this group message @mention me or reply to one of my messages? */
@@ -532,6 +636,10 @@ export class Incoming {
       if (cmd === 'text') { const q = this.quotedMsg(it); if (q?.message?.audioMessage) { const text = await transcribe(await this.download(q)); return this.reply(it, `🎤 ${text}`, 'alert'); } }
     }
     if (!F.commands) return;
+    // 📦 !projects / !project <name>: also for everyone VR Bot mode answers (it's VR's promo), not only the command picks
+    if ((cmd === 'projects' || cmd === 'project') && en.projects !== false && (isOwner || inScope(featureScope(S, 'commands'), scopeCtx(it)) || (F.botMode && inScope(botScope(S), scopeCtx(it))))) {
+      return this.reply(it, projectsCommand(S, arg, prefix));
+    }
     if (!isOwner && !inScope(featureScope(S, 'commands'), scopeCtx(it))) return; // only me + the people/groups picked in Settings
     switch (cmd) {
       case 'help': return en.help !== false && this.reply(it, helpText(S, isOwner && !it.isGroup));

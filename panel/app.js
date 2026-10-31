@@ -16,6 +16,8 @@ import { busyNow, modeNow, busyText, busyTimeText, modeScopeCfg, MODES } from '.
 import { VOICE_BRANCH, VOICE_DIR, VOICE_LIMITS, clipPaths, clipIdFromPath, newClipId, cleanName, nameKey, findClip, voicePlan, ruleCooldown, fmtSecs, fmtSize } from './shared/voice.js';
 import { sniffAudio, isOggOpus, readOgg, webmToOgg, encodeToOgg, waveformOf } from './shared/ogg.js';
 import { NOTES_BRANCH, NOTES_DIR, NOTES_LIMITS, notePath, noteIdFromPath, newNoteId, cleanNoteText, sortNotes, searchNotes, linksIn, linkParts, notePreview } from './shared/notes.js';
+import { botCfg, detectTrigger, botIntent, GROQ_HELP } from './shared/botmode.js';
+import { DEFAULT_PROJECTS, projectsOf, brandOf, topicMatches } from './shared/projects.js';
 import { SPECIAL_DAYS, SPECIAL_BY_ID, upcomingSpecials, specialConfig, specialFor, cardUrl } from './shared/specialdays.js';
 
 const FILES = ['settings', 'contacts', 'schedules', 'templates', 'festivals', 'rules', 'groups'];
@@ -638,7 +640,7 @@ function renderContactEditor(id) {
 function renderReplies() {
   if (!D || D._id !== 'replies') D = { ...clone(settings()), _kind: 'settings', _id: 'replies' };
   const s = D;
-  view().innerHTML = `<div class="ph"><div><h1>Replies</h1><p>Busy mode, auto-replies, away and AI replies</p></div></div>
+  view().innerHTML = `<div class="ph"><div><h1>Replies</h1><p>Busy mode, auto-replies, away, AI replies and VR Bot mode</p></div></div>
   ${alwaysOn() ? '' : '<div class="banner warn"><span>⏱</span><div><b>These replies are delayed</b>Always on is off (or the bot is paused), so GitHub wakes the bot about every 30 minutes and replies arrive on the next check — not instantly. Scheduled messages are still exact. Turn on Settings → Timing → Always on for near-instant replies.</div></div>'}
   ${busyCard(s)}
   <div class="card"><h2>⚡ Auto-reply rules <span class="count">${rules().length}</span></h2>
@@ -670,12 +672,83 @@ function renderReplies() {
     <div class="grid2"><div class="field"><label for="fAiM">Memory (messages)</label><input id="fAiM" type="number" min="0" max="20" data-f="ai.memory" data-type="num" value="${esc(s.ai.memory)}"></div><div class="field"><label for="fAiC">Max replies / chat / day</label><input id="fAiC" type="number" min="1" data-f="ai.maxPerChatPerDay" data-type="num" value="${esc(s.ai.maxPerChatPerDay)}"></div></div>
     <div class="field"><label for="fAiModel">Model</label><input id="fAiModel" type="text" data-f="ai.model" value="${esc(s.ai.model)}"><p class="hint">Free plan default: openai/gpt-oss-120b (30 requests/min, 1,000/day).</p></div>
   </div>
+  ${botModeCard(s)}
   <div class="sticky-save"><button class="btn primary" data-act="settings-save">Save replies</button></div>`;
+  $('#botTest')?.addEventListener('input', (e) => { $('#botTestOut').innerHTML = botTestText(e.target.value, D); });
+  $('#pjBox')?.addEventListener('toggle', (e) => { if (D) D._pjOpen = e.target.open; });
   $('#ruleTest').addEventListener('input', (e) => {
     const t = e.target.value; const hit = rules().find((r) => matchText(r, t) && ruleApplies(r, {}));
     const vp = hit ? voicePlan(hit) : null;
     $('#ruleTestOut').innerHTML = !t ? 'Type to see which rule would answer.' : hit ? `✅ Rule “${esc(hit.pattern)}” replies: <b>${vp.voice ? `🎙️ voice clip “${esc(hit.voice.name || '')}”${vp.text ? ' + ' : ''}` : ''}${vp.voice && !vp.text ? '' : esc(Array.isArray(hit.reply) ? hit.reply[0] : hit.reply)}</b>${vp.voice ? ' (AI stays quiet for this message)' : ''}` : `No rule matches${s.features.ai ? ' → AI would reply' : ''}.`;
   });
+}
+
+/* ---- 🤖 VR Bot mode (Replies screen) ---- */
+/** Banner: the free Groq key is missing (the bot tells us in status.groq; never the key itself). */
+function groqBanner() {
+  const g = status().groq;
+  if (g?.key === true) return '';
+  const steps = GROQ_HELP.split('\n').slice(1).map((l) => `<li>${esc(l.replace(/^\d+\.\s*/, ''))}</li>`).join('');
+  return `<div class="banner ${g?.key === false ? 'warn' : 'info'}"><span>🔑</span><div><b>${g?.key === false ? 'GROQ key missing — the AI part is off' : 'Needs the free GROQ key for the AI part'}</b>${g?.key === false ? 'The bot checked on its last run: no GROQ_API_KEY secret.' : 'If you already added GROQ_API_KEY, ignore this — it disappears after the bot\'s next run.'} Free, no card, about 2 minutes:<ol class="small" style="margin:6px 0 0 18px;padding:0">${steps}</ol><span class="small">Without it: real pictures, AI drawings, link titles and Wikipedia answers still work; chatting, web search and “what's this?” photos need the key.</span></div></div>`;
+}
+const BOT_ALLOW = [
+  ['chat', '💬 Explain & chat', 'Explains topics, study doubts, code, stories, jokes, “who is your boss” (from About you only)'],
+  ['web', '🔗 Links & web search', 'Reads links friends send (YouTube too) and searches the web for latest info — with source links'],
+  ['vision', '🖼️ Understand photos', 'Photo + caption “vr bot what\'s this?” (or reply to a photo)'],
+  ['pics', '📷 Real pictures', '“vr bot show me a pic of Charminar” → a real photo from Wikipedia/Wikimedia'],
+  ['draw', '🎨 AI drawings', '“vr bot draw a dragon in space” → a free AI image, captioned “AI-generated”'],
+];
+function botModeCard(s) {
+  const b = botCfg(s); s.botMode = s.botMode || {};
+  const t0 = (b.triggers[0] || 'vr bot').replace(/[,:]$/, '');
+  return `<div class="card" id="botmode"><h2>🤖 VR Bot mode</h2>
+    <p class="hint" style="margin-top:0">Friends talk to the <b>bot itself</b>: “hey ${esc(t0)}, explain black holes”, “${esc(t0)} tell a story”, “${esc(t0)} who's your boss?”. It answers as <b>${esc(s.botName || 'VR Bot')} 🤖, ${esc(s.myName || 'your')}'s assistant</b>, never as you. Normal messages keep the “AI in your style” replies above.</p>
+    ${sw('VR Bot mode', 'Answer messages that start with a trigger word', 'data-f="features.botMode" data-rr="1"', s.features.botMode, delayedPill())}
+    ${s.features.botMode ? groqBanner() : ''}
+    <div class="field" style="margin-top:10px"><label for="fBotTrig">Trigger words (one per line)</label><textarea id="fBotTrig" data-f="botMode.triggers" data-type="lines" style="min-height:80px">${esc(b.triggers.join('\n'))}</textarea><p class="hint">Any capitals; “hey/hi/ok ${esc(t0)} …”, “${esc(t0)} ra …” and “… , ${esc(t0)}?” work too. Whole words only: “robot” never triggers. End a word with a comma (like <b>bot,</b>) to need the comma. In groups, “@you bot …” works as well.</p></div>
+    <div class="field"><span class="lbl">What it may do</span>${BOT_ALLOW.map(([k, l, d]) => sw(l, d, `data-f="botMode.allow.${k}"`, b.allow[k] !== false)).join('')}</div>
+    <div class="field"><span class="lbl">Who can use it (private chats)</span>${seg('botMode.who', [['everyone', 'Everyone'], ['contacts', 'My contacts'], ['pick', 'Only these…']], whoMode(b.who))}${whoMode(b.who) === 'pick' ? peopleChips('botMode') : ''}</div>
+    <div class="field"><span class="lbl">🚫 Never answer these people</span>${excludeChips('botMode', 'VR Bot')}<p class="hint">People blocked for AI replies above are skipped here too.</p></div>
+    <div class="field"><span class="lbl">VR Bot in groups</span>${groupScope('botMode.groups', b.groups, [['all', 'All groups'], ['none', 'No groups'], ['pick', 'Only these groups']], { all: 'Only when someone starts with a trigger word (or tags you + “bot”). Never on normal group chat.', none: 'Never in groups.', pick: 'Only when someone starts with a trigger word there.' })}</div>
+    ${sw('Answer even in busy / class mode', 'On: “vr bot …” questions still get the bot’s answer while busy/class is on (the question is for the bot, not you). Off: they get the busy/class reply like everyone else.', 'data-f="botMode.inBusy"', b.inBusy !== false)}
+    <div class="grid2"><div class="field"><label for="fBotPP">Answers / person / day</label><input id="fBotPP" type="number" min="1" max="200" data-f="botMode.perPersonPerDay" data-type="num" value="${esc(b.perPersonPerDay)}"></div><div class="field"><label for="fBotG">Total answers / day</label><input id="fBotG" type="number" min="1" max="900" data-f="botMode.globalPerDay" data-type="num" value="${esc(b.globalPerDay)}"></div></div>
+    <div class="grid2"><div class="field"><label for="fBotCd">Wait between answers in a chat (sec)</label><input id="fBotCd" type="number" min="0" max="600" data-f="botMode.cooldownSeconds" data-type="num" value="${esc(b.cooldownSeconds)}"></div><div class="field"><label for="fBotL">Max lines per answer</label><input id="fBotL" type="number" min="3" max="25" data-f="botMode.maxLines" data-type="num" value="${esc(b.maxLines)}"></div></div>
+    <p class="hint">Groq's free plan allows 1,000 requests a day per model, so keep the total well under that (default 300). You get a notification when someone hits a limit.</p>
+    ${projectsBlock(s, b)}
+    <div class="field" style="margin-top:10px"><label for="botTest">Test a message</label><input id="botTest" type="text" placeholder="hey ${esc(t0)} draw a cat"><p class="hint" id="botTestOut">Type to see if VR Bot would answer, and how.</p></div>
+  </div>`;
+}
+/** 📦 VR DEVELOPMENTS projects: the list VR Bot shows/promotes (add, edit, remove, reorder) + the promo switch. */
+function projectsBlock(s, b) {
+  const list = Array.isArray(s.projects) ? s.projects : [];
+  const br = brandOf(s);
+  const row = (p, i) => `<div class="card" style="padding:10px;margin-bottom:8px">
+      <div style="display:flex;gap:6px;align-items:center"><b style="min-width:22px">${i + 1}.</b><input type="text" aria-label="Project name" data-f="projects.${i}.name" value="${esc(p.name || '')}" placeholder="Project name"></div>
+      <input type="text" aria-label="One line about it" style="margin-top:6px" data-f="projects.${i}.tagline" value="${esc(p.tagline || '')}" placeholder="One line about it">
+      <input type="url" aria-label="Link" style="margin-top:6px" data-f="projects.${i}.link" value="${esc(p.link || '')}" placeholder="https://… (empty = coming soon)">
+      <input type="text" aria-label="Topics" style="margin-top:6px" data-f="projects.${i}.tags" data-type="csv" value="${esc((p.tags || []).join(', '))}" placeholder="topics: weather, rain, forecast">
+      <div style="display:flex;gap:6px;margin-top:6px;flex-wrap:wrap"><button class="btn sm ghost" data-act="pj-up" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move up">↑</button><button class="btn sm ghost" data-act="pj-down" data-i="${i}" ${i === list.length - 1 ? 'disabled' : ''} aria-label="Move down">↓</button><button class="btn sm ghost" data-act="pj-rm" data-i="${i}">Remove</button></div>
+    </div>`;
+  return `<div class="field" style="margin-top:12px"><span class="lbl">📦 Projects (${esc(br.company)})</span>
+    <p class="hint" style="margin-top:0">“${esc((b.triggers[0] || 'vr bot').replace(/[,:]$/, ''))} show ${esc(br.owner)}'s projects” → the top 5 (+ “more” for all), “… tell me about RepoDNA” → that one, and friends can send <b>!projects</b>. The bot only talks about projects in this list. The first 5 are the ones shown first.</p>
+    ${sw('💡 Mention a matching project', `After answering a question on a project's topics (weather → GeoWeather3D, code error → Coding Insight…), add ONE line: “btw ${esc(br.owner)} built … for this → link”. Only in VR Bot mode answers, never in your normal replies.`, 'data-f="botMode.promo" data-rr="1"', b.promo !== false)}
+    ${b.promo !== false ? `<div class="field"><label for="fBotPe">Same project in the same chat at most once every (days)</label><input id="fBotPe" type="number" min="1" max="30" data-f="botMode.promoEveryDays" data-type="num" value="${esc(b.promoEveryDays ?? 1)}"></div>` : ''}
+    <details ${D?._pjOpen ? 'open' : ''} id="pjBox"><summary class="small" style="cursor:pointer;padding:6px 0"><b>Edit projects (${list.length})</b> — name, one line, link, topics</summary>
+      ${list.map(row).join('')}
+      <div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn sm" data-act="pj-add">＋ Add project</button><button class="btn sm ghost" data-act="pj-reset">↺ Reset to the ${DEFAULT_PROJECTS.length} defaults</button></div>
+      <div class="grid2" style="margin-top:10px"><div class="field"><label for="fBrS">Company site</label><input id="fBrS" type="url" data-f="brand.site" value="${esc(br.site)}"></div><div class="field"><label for="fBrG">GitHub</label><input id="fBrG" type="url" data-f="brand.github" value="${esc(br.github)}"></div></div>
+      <p class="hint">Topics are comma separated, whole words (“weather” never matches “whether”); end a word with * for any ending (“recipe*”). Tap <b>Save replies</b> to keep changes.</p>
+    </details></div>`;
+}
+const BOT_KIND = { projects: '📦 your projects list (top 5, “more” for all)', project: '📦 that project + link', empty: 'says hi + shows examples', personal: '“he’ll reply himself” (private question about you)', draw: '🎨 AI drawing', pic: '📷 real picture', vision: '🖼️ looks at the photo', link: '🔗 reads the link + summary', web: '🌐 web search with source links', chat: '💬 explains / chats' };
+function botTestText(text, s) {
+  if (!text) return 'Type to see if VR Bot would answer, and how.';
+  const t = detectTrigger(text, botCfg(s).triggers);
+  if (!t.hit) return 'Not for the bot → normal replies (rules / AI in your style).';
+  const P = projectsOf(s);
+  const i = botIntent(t.question, { projects: P });
+  const promo = ['chat', 'web', 'link'].includes(i.type) && botCfg(s).promo !== false ? topicMatches(t.question, P)[0] : null;
+  return `✅ VR Bot answers: <b>${esc(BOT_KIND[i.type] || i.type)}</b>${i.subject ? ` — “${esc(i.subject)}”` : ''}${i.project ? ` — ${esc(i.project.name)}` : ''}${promo ? ` + 💡 “btw ${esc(brandOf(s).owner)} built ${esc(promo.name)}”` : ''}${s.features?.botMode ? '' : ' (switch VR Bot mode on first)'}`;
 }
 
 function renderRuleEditor(id) {
@@ -842,6 +915,7 @@ function renderSettings() {
     ${feat('autoReply', 'Auto-reply rules', 'Keyword replies', true)}
     ${feat('away', 'Away mode', 'Away message', true)}
     ${feat('ai', 'AI replies', 'Groq, in your style', true)}
+    ${feat('botMode', 'VR Bot mode 🤖', '“hey vr bot …” → the bot answers as your assistant (Replies → VR Bot mode)', true)}
     ${feat('groupTools', 'Group tools', 'Welcome, anti-link, !tagall, !rules', true)}
     ${feat('commands', 'Commands', '!sticker !pdf !weather !help !yt', true)}
     ${feat('voiceToText', 'Voice note → text', 'Groq Whisper (needs GROQ_API_KEY)', true)}
@@ -1048,7 +1122,7 @@ function sentRow(e) {
   const txt = String(e.text || '');
   const long = txt.length > 180;
   const head = e.cat === 'status' ? `📸 My status → ${e.count ?? (e.people || []).length} ${e.count === 1 ? 'person' : 'people'}` : e.cat === 'reports' ? `📋 ${esc(e.title || 'Report')} (to you)` : esc(e.to || 'a chat');
-  return `<div class="row" style="align-items:flex-start"><div class="ic">${e.kind === 'voice' ? '🎙️' : e.kind === 'class' ? '🎓' : CAT_ICON[e.cat] || '💬'}</div><div class="main"><div class="t">${head} <span class="pill tiny">${esc(CAT_LABEL[e.cat] || e.cat || '')}</span>${e._push ? ' <span class="pill cy tiny">new</span>' : ''}</div>
+  return `<div class="row" style="align-items:flex-start"><div class="ic">${e.kind === 'voice' ? '🎙️' : e.kind === 'class' ? '🎓' : e.kind === 'bot' ? '🤖' : CAT_ICON[e.cat] || '💬'}</div><div class="main"><div class="t">${head} <span class="pill tiny">${esc(CAT_LABEL[e.cat] || e.cat || '')}</span>${e._push ? ' <span class="pill cy tiny">new</span>' : ''}</div>
     <div class="d" style="white-space:pre-wrap;word-break:break-word">${long ? `<details class="sent-more"><summary><span style="color:var(--muted);font-weight:400">${esc(txt.slice(0, 180))}…</span> Show all</summary>${esc(txt)}</details>` : esc(txt)}</div>${peopleList(e)}</div><div class="r">${esc(t)}</div></div>`;
 }
 function renderSent() {
@@ -1565,7 +1639,7 @@ function onField(e) {
 }
 function rerender() { const y = window.scrollY; const h = location.hash; for (const [re, fn] of routes) { const m = h.match(re); if (m) { fn(m[1]); break; } } window.scrollTo(0, y); }
 const replaceIn = (list, item) => { const i = list.findIndex((x) => x.id === item.id); const copy = [...list]; if (i >= 0) copy[i] = item; else copy.push(item); return copy; };
-const strip = (o) => { const c = clone(o); delete c._id; delete c._kind; return c; };
+const strip = (o) => { const c = clone(o); delete c._id; delete c._kind; delete c._pjOpen; return c; };
 async function guarded(fn) { try { await fn(); } catch (e) { console.error(e); toast(e.message || String(e), 'bad'); } }
 
 async function onClick(e) {
@@ -1663,6 +1737,14 @@ async function onClick(e) {
       }
       case 'ex-add': D.ai.examples = [...(D.ai.examples || []), { them: '', me: '' }]; await save('settings', strip(D)); rerender(); break;
       case 'ex-rm': D.ai.examples.splice(Number(b.dataset.i), 1); await save('settings', strip(D)); rerender(); break;
+      case 'pj-add': D.projects = [...(D.projects || []), { name: '', tagline: '', link: '', tags: [] }]; D._pjOpen = true; rerender(); break;
+      case 'pj-rm': { const i = Number(b.dataset.i); const p = D.projects?.[i]; if (p && (!p.name || confirm(`Remove “${p.name}”?`))) D.projects.splice(i, 1); D._pjOpen = true; rerender(); break; }
+      case 'pj-up': case 'pj-down': {
+        const i = Number(b.dataset.i), j = b.dataset.act === 'pj-up' ? i - 1 : i + 1;
+        if (D.projects && j >= 0 && j < D.projects.length) [D.projects[i], D.projects[j]] = [D.projects[j], D.projects[i]];
+        D._pjOpen = true; rerender(); break;
+      }
+      case 'pj-reset': if (confirm(`Replace the list with the ${DEFAULT_PROJECTS.length} default projects?`)) { D.projects = clone(DEFAULT_PROJECTS); D._pjOpen = true; rerender(); } break;
       case 'busy-dur': modeDur[b.dataset.mode || 'busy'] = b.dataset.v; rerender(); break;
       case 'busy-on': case 'busy-off': {
         const now = Date.now(), mode = b.dataset.mode || 'busy', M = MODES[mode];

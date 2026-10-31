@@ -1,5 +1,8 @@
 // VR Bot — default settings. Anything missing in data/settings.json falls back to these.
 // © VR DEVELOPMENTS
+import { BOT_DEFAULTS } from './botmode.js';
+import { DEFAULT_PROJECTS, DEFAULT_BRAND } from './projects.js';
+
 export const DEFAULT_SETTINGS = {
   version: 2, // 2 = per-chat/per-group controls (commands default to "only me")
   botName: 'VR Bot',
@@ -28,6 +31,7 @@ export const DEFAULT_SETTINGS = {
     autoReply: true, ai: false, away: false, broadcast: true, groupTools: true,
     commands: true, voiceToText: false, mediaSave: false, alerts: true,
     followup: false, summary: true, failureAlerts: true,
+    botMode: false, // 🤖 VR Bot mode: friends chat with the bot itself ("hey vr bot …") — see botMode below
   },
   replies: { maxAgeHours: 6, skipIfIReplied: true, stickers: false }, // stickers: also answer stickers & GIFs (off = ignore them)
   ai: {
@@ -48,6 +52,11 @@ export const DEFAULT_SETTINGS = {
     memory: 8,              // remember the last N messages per chat
     maxPerChatPerDay: 15,
   },
+  // 🤖 VR Bot mode (Replies → VR Bot mode) — triggers, what it may do, who, daily caps. See shared/botmode.js
+  botMode: JSON.parse(JSON.stringify(BOT_DEFAULTS)),
+  // 📦 VR DEVELOPMENTS projects VR Bot mode may promote (editable: Replies → 🤖 VR Bot mode → 📦 Projects)
+  projects: JSON.parse(JSON.stringify(DEFAULT_PROJECTS)), // [{ name, tagline, link, tags }]
+  brand: { ...DEFAULT_BRAND },
   away: {
     message: "Hey! I'm away right now 🙂 I'll reply when I'm back.",
     window: { enabled: true, from: '23:00', to: '07:00' }, // auto-away at night; switch off for "always away"
@@ -61,7 +70,7 @@ export const DEFAULT_SETTINGS = {
     contacts: [], tags: [],
     inGroups: true,
     groups: 'all',          // all (same people as above) | none | [group ids] (anyone in those groups)
-    enabled: { help: true, weather: true, sticker: true, pdf: true, yt: false, tagall: true, rules: true },
+    enabled: { help: true, weather: true, sticker: true, pdf: true, yt: false, tagall: true, rules: true, projects: true }, // projects: !projects / !project <name>
   },
   voice: { sendTo: 'owner', maxSeconds: 300, who: 'everyone', contacts: [], tags: [] }, // owner = transcript goes to you; chat = reply in that chat
   media: { statuses: false, chats: true, maxFileMB: 3, totalCapMB: 300, types: ['image', 'audio', 'video', 'document'],

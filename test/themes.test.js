@@ -82,13 +82,13 @@ test('themes: every look and mode has CSS; every token used is defined; nothing 
   assert.match(base, /@media \(prefers-reduced-motion:reduce\)\{\*,\*::before,\*::after\{animation:none!important;transition:none!important\}\}/, 'motion off when the phone asks');
 });
 
-test('themes: loaded before the page draws, cached for offline (sw v9), CSP-safe', () => {
+test('themes: loaded before the page draws, cached for offline (sw v10+), CSP-safe', () => {
   const html = read('index.html'), sw = read('sw.js');
   const head = html.slice(0, html.indexOf('</head>'));
   assert.ok(head.includes('<link rel="stylesheet" href="themes.css">'));
   assert.ok(head.includes('<script src="theme.js"></script>'), 'plain script in <head> (no flash of the wrong look)');
   assert.ok(head.indexOf('theme-color') < head.indexOf('theme.js'), 'meta theme-color exists before the script sets it');
-  assert.match(sw, /const CACHE = 'vr-bot-v9';/);
+  assert.match(sw, /const CACHE = 'vr-bot-v1\d';/, 'cache bumped (v10+ since VR Bot mode)');
   for (const f of ['themes.css', 'theme.js', 'shared/notes.js']) assert.ok(sw.includes(`'${f}'`), `${f} precached`);
   assert.ok(!/<script>/.test(html), 'no inline script (CSP script-src self)');
 });

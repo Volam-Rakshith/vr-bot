@@ -3,6 +3,8 @@ import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { botHelpLines } from '../../panel/shared/botmode.js';
+import { brandOf } from '../../panel/shared/projects.js';
 
 const WMO = { 0: 'Clear sky ☀️', 1: 'Mainly clear 🌤️', 2: 'Partly cloudy ⛅', 3: 'Overcast ☁️', 45: 'Fog 🌫️', 48: 'Fog 🌫️', 51: 'Light drizzle 🌦️', 53: 'Drizzle 🌦️', 55: 'Heavy drizzle 🌧️', 61: 'Light rain 🌦️', 63: 'Rain 🌧️', 65: 'Heavy rain 🌧️', 71: 'Light snow 🌨️', 73: 'Snow 🌨️', 75: 'Heavy snow ❄️', 80: 'Rain showers 🌦️', 81: 'Rain showers 🌧️', 82: 'Violent showers ⛈️', 95: 'Thunderstorm ⛈️', 96: 'Thunderstorm + hail ⛈️', 99: 'Thunderstorm + hail ⛈️' };
 
@@ -77,15 +79,19 @@ export async function ytAudio(url, maxMB = 15) {
 export function helpText(s, isOwner) {
   const p = s.commands?.prefix || '!';
   const en = s.commands?.enabled || {};
-  const lines = [`🤖 *${s.botName || 'VR Bot'}* — commands`, '_Replies come on the next check (within ~30 min), not instantly._', ''];
+  // "Always on" (default): the bot stays connected and checks for new messages every few seconds.
+  const live = s.timing?.relay !== false && !s.paused;
+  const lines = [`🤖 *${s.botName || 'VR Bot'}* — commands`, live ? '_Replies usually come within a minute (a bit longer while the bot restarts)._' : '_Replies come on the next check (within ~30 min), not instantly._', ''];
   if (en.weather) lines.push(`${p}weather <city> — today's weather`);
   if (en.sticker) lines.push(`${p}sticker — send/reply to an image with this`);
   if (en.pdf) lines.push(`${p}pdf — send images with caption ${p}pdf → one PDF`);
   if (en.yt) lines.push(`${p}yt <link> — YouTube audio (experimental)`);
   if (en.tagall) lines.push(`${p}tagall <msg> — mention everyone (group admins)`);
   if (en.rules) lines.push(`${p}rules — group rules`);
+  if (en.projects !== false) lines.push(`${p}projects — ${brandOf(s).owner}'s projects (${brandOf(s).company}) · ${p}project <name>`);
   lines.push(`${p}help — this list`);
+  lines.push(...botHelpLines(s));
   if (isOwner) lines.push('', '*Owner:*', `${p}away <msg> · ${p}back · ${p}status · ${p}pause · ${p}resume · ${p}text (reply to a voice note)`, `${p}busy 2h · ${p}busy until 5pm · ${p}busy off`, `${p}class 2h · ${p}class till 4 · ${p}class (1h) · ${p}free (ends busy/class)`, `${p}voice save <name> (reply to a voice note) · ${p}voice list · ${p}voice play <name> · ${p}voice delete <name>`, `${p}note <text> (or reply ${p}note to any message) · ${p}notes · ${p}notes <word> · ${p}note delete <n>`);
-  lines.push('', '— VR Bot by VR DEVELOPMENTS');
+  lines.push('', `— ${s.botName || 'VR Bot'} by ${brandOf(s).company}`);
   return lines.join('\n');
 }

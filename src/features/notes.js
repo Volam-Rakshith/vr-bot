@@ -42,7 +42,8 @@ export class NotesBook {
     if (!text) throw new Error('the note is empty');
     await this.refresh();
     if (this.notes.length >= NOTES_LIMITS.maxNotes) throw new Error(`you have ${NOTES_LIMITS.maxNotes} notes — delete some first (panel → More → Notes)`);
-    const now = Date.now();
+    // strictly newer than every note we hold, so two notes saved in the same millisecond keep their order
+    const now = Math.max(Date.now(), ...this.notes.map((x) => (Number(x.at) || 0) + 1));
     const note = { v: 1, id: newNoteId(now), text, from: fields.from || 'me', fromNum: fields.fromNum || '', kind: fields.kind || 'text', forwarded: !!fields.forwarded, sentAt: fields.sentAt || 0, at: now, by: fields.by || 'whatsapp' };
     if (fields.chat) note.chat = String(fields.chat).slice(0, 80);
     if (!note.fromNum) delete note.fromNum;
