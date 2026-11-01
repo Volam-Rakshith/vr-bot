@@ -18,6 +18,7 @@ import { sniffAudio, isOggOpus, readOgg, webmToOgg, encodeToOgg, waveformOf } fr
 import { NOTES_BRANCH, NOTES_DIR, NOTES_LIMITS, notePath, noteIdFromPath, newNoteId, cleanNoteText, sortNotes, searchNotes, linksIn, linkParts, notePreview } from './shared/notes.js';
 import { botCfg, detectTrigger, botIntent, GROQ_HELP } from './shared/botmode.js';
 import { DEFAULT_PROJECTS, projectsOf, brandOf, topicMatches } from './shared/projects.js';
+import { GROUP_ADMIN_DEFAULTS, GROUP_ADMIN_LIMITS, ADMIN_FLAGS, warnLimitOf, spamCfgOf, slowCfgOf, badWordsCfgOf, goodbyeCfgOf, effectiveSetting } from './shared/groupadmin.js';
 import { SPECIAL_DAYS, SPECIAL_BY_ID, upcomingSpecials, specialConfig, specialFor, cardUrl } from './shared/specialdays.js';
 
 const FILES = ['settings', 'contacts', 'schedules', 'templates', 'festivals', 'rules', 'groups'];
@@ -667,7 +668,10 @@ function renderReplies() {
       <button class="btn sm" data-act="ex-add">＋ Add example</button></div>
     <div class="field"><span class="lbl">Who gets AI replies (private chats)</span>${seg('ai.who', [['contacts', 'My contacts'], ['pick', 'Only these…'], ['everyone', 'Everyone']], whoMode(s.ai.who))}${whoMode(s.ai.who) === 'pick' ? peopleChips('ai') : ''}</div>
     <div class="field"><span class="lbl">🚫 Never send AI replies to these people</span>${excludeChips('ai', 'the AI')}</div>
-    <div class="field"><span class="lbl">AI in groups</span>${groupScope('ai.groups', s.ai.groups, [['none', 'No groups'], ['pick', 'Only these groups']], { none: 'The AI never answers in groups.', pick: 'It answers there only when someone @mentions you or replies to your message.' })}</div>
+    <div class="field"><span class="lbl">AI in groups</span>${groupScope('ai.groups', s.ai.groups, [['none', 'No groups'], ['pick', 'Only these groups']], { none: 'The AI never answers in groups.', pick: s.ai.groupReplyAll === true ? 'It answers there to every message (see below).' : 'It answers there only when someone @mentions you or replies to your message.' })}</div>
+    ${(s.ai.groups ?? 'none') !== 'none' ? `<div class="field"><span class="lbl">In these groups reply to</span>${seg('ai.groupReplyAll', [['false', "Only when I'm @mentioned / replied to"], ['true', 'Every message']], String(s.ai.groupReplyAll === true))}
+      ${s.ai.groupReplyAll === true ? `<label for="fAiGc" style="margin-top:8px">Wait between replies in a group (seconds)</label><input id="fAiGc" type="number" min="15" data-f="ai.groupCooldownSec" data-type="num" value="${esc(s.ai.groupCooldownSec ?? 60)}">` : ''}
+      <p class="hint">${s.ai.groupReplyAll === true ? 'Replies at most once per group per cooldown (min 15 s), never to bot messages, and stays quiet if you posted in the group after the message. Uses your free Groq daily limit, and "Max replies / chat / day" below counts per group.' : 'Every message: replies at most once per group per cooldown, uses your free Groq daily limit.'}</p></div>` : ''}
     ${sw('Also react with an emoji', 'The AI picks one fitting reaction (❤️ 👍 😂 😮 😢 🙏 🔥 🎉) or none, on the same messages it answers', 'data-f="ai.react"', s.ai.react)}
     <div class="grid2"><div class="field"><label for="fAiM">Memory (messages)</label><input id="fAiM" type="number" min="0" max="20" data-f="ai.memory" data-type="num" value="${esc(s.ai.memory)}"></div><div class="field"><label for="fAiC">Max replies / chat / day</label><input id="fAiC" type="number" min="1" data-f="ai.maxPerChatPerDay" data-type="num" value="${esc(s.ai.maxPerChatPerDay)}"></div></div>
     <div class="field"><label for="fAiModel">Model</label><input id="fAiModel" type="text" data-f="ai.model" value="${esc(s.ai.model)}"><p class="hint">Free plan default: openai/gpt-oss-120b (30 requests/min, 1,000/day).</p></div>
@@ -794,7 +798,8 @@ function renderMore() {
     <a class="row" href="#/status"><div class="ic">📸</div><div class="main"><div class="t">Auto status</div><div class="d">${settings().autoStatus?.enabled ? 'On · ' + esc(pretty12(settings().autoStatus.time)) : 'Off'} · motivational quotes or your own text</div></div><div class="r">›</div></a>
     <a class="row" href="#/festivals"><div class="ic">🪔</div><div class="main"><div class="t">Festivals & occasions</div><div class="d">Diwali, Sankranti, Eid, New Year… 2026–2027</div></div><div class="r">›</div></a>
     <a class="row" href="#/templates"><div class="ic">🧩</div><div class="main"><div class="t">Templates</div><div class="d">Reusable messages with {name}, {date}…</div></div><div class="r">›</div></a>
-    <a class="row" href="#/groups"><div class="ic">👥</div><div class="main"><div class="t">Group tools</div><div class="d">Welcome, anti-link, !tagall, !rules</div></div><div class="r">›</div></a>
+    <a class="row" href="#/troll"><div class="ic">😈</div><div class="main"><div class="t">Troll mode</div><div class="d">${settings().troll?.enabled === false ? 'Off' : 'On'} · send one sentence many times into a chat</div></div><div class="r">›</div></a>
+    <a class="row" href="#/groups"><div class="ic">👥</div><div class="main"><div class="t">Group tools</div><div class="d">Welcome, goodbye, warns, anti-spam, night lock…</div></div><div class="r">›</div></a>
     <a class="row" href="#/settings"><div class="ic">⚙️</div><div class="main"><div class="t">Settings</div><div class="d">Features on/off, header, timing, alerts</div></div><div class="r">›</div></a>
     <a class="row" href="#/logs"><div class="ic">🧾</div><div class="main"><div class="t">Logs</div><div class="d">Sent messages, runs, saved media</div></div><div class="r">›</div></a>
   </div></div>
@@ -805,6 +810,52 @@ function renderMore() {
     <a class="row" href="#/logout"><div class="ic">🚪</div><div class="main"><div class="t">Sign out</div><div class="d">Removes the token and password from this phone</div></div><div class="r">›</div></a>
   </div></div>
   <p class="tiny muted" style="text-align:center">VR Bot v1.0 · by VR DEVELOPMENTS · <a href="https://vrdevelopments.sites.tab.bot" target="_blank" rel="noopener">vrdevelopments</a> · <a href="https://github.com/Volam-Rakshith" target="_blank" rel="noopener">GitHub</a></p>`;
+}
+
+/* ---- 😈 Troll mode: one sentence N times into a chat (owner only; the bot runs it on its next check) ---- */
+const TROLL_MAX = 50;
+function renderTroll() {
+  if (!D || D._id !== 'troll') D = { ...clone(settings()), _kind: 'settings', _id: 'troll' };
+  const t = D.troll || { enabled: true };
+  const on = t.enabled !== false;
+  const last = status().troll;
+  const job = settings().troll?.job;
+  view().innerHTML = `<button class="back" data-act="go" data-v="#/more">‹ More</button>
+  <div class="ph"><div><h1>😈 Troll mode</h1><p>Send one sentence many times into a chat</p></div></div>
+  <div class="card"><h2>😈 Troll mode</h2>
+    ${sw('Troll mode', 'Only you can use it: here or with !troll in WhatsApp. Friends can never start it.', 'data-f="troll.enabled" data-rr="1"', on)}
+    ${on ? `<div class="field" style="margin-top:10px"><label for="trTo">Send to</label><select id="trTo">
+      <option value="">Pick a group or contact…</option>
+      <optgroup label="Groups">${seenGroups().map((g) => `<option value="group:${esc(g.id)}">👥 ${esc(g.name)}</option>`).join('')}</optgroup>
+      <optgroup label="Contacts">${contacts().filter((c) => c.number).map((c) => `<option value="contact:${esc(c.id)}">👤 ${esc(c.name)}</option>`).join('')}</optgroup>
+    </select>${seenGroups().length ? '' : '<p class="hint">Your WhatsApp groups appear here after the bot\'s first run.</p>'}</div>
+    <div class="field"><label for="trText">Sentence</label><textarea id="trText" placeholder="Wake up 😴"></textarea></div>
+    <div class="field"><label for="trCount">How many times (max ${TROLL_MAX})</label><input id="trCount" type="number" min="1" max="${TROLL_MAX}" value="10"></div>
+    <div class="btns"><button class="btn primary" data-act="troll-send">😈 Send</button></div>
+    <p class="hint">Goes out on the bot's next check (within ~4 min), one message every 1.2–2.5 s, plain text, no header. Max ${TROLL_MAX} per burst and 3 bursts per 10 min, and it stops on the first error, so WhatsApp doesn't ban your number. Stop it any time: <b>!troll stop</b> in WhatsApp.</p>
+    <p class="hint">In WhatsApp: <b>!troll 10 wake up</b> typed in the chat, or <b>!troll @AIML 10 wake up</b> from your own chat.</p>` : ''}
+    ${job ? `<p class="small muted">Last sent from here: ${esc(String(job.count))}× “${esc(String(job.text).slice(0, 40))}” → ${esc(job.to?.name || '')}, ${esc(ago(job.at))}</p>` : ''}
+    ${last ? `<p class="small muted">Last burst: ${esc(String(last.sent))}/${esc(String(last.count))} to ${esc(last.to)}${last.stopped ? ' (stopped)' : ''}${last.error ? ` ⚠️ ${esc(last.error)}` : ''}, ${esc(ago(last.at))}</p>` : ''}
+  </div>
+  <div class="sticky-save"><button class="btn primary" data-act="settings-save">Save</button></div>`;
+}
+async function trollSend() {
+  const to = $('#trTo')?.value || '', text = ($('#trText')?.value || '').trim();
+  let count = Math.floor(Number($('#trCount')?.value || 0));
+  if (!to) throw new Error('Pick a group or contact');
+  if (!text) throw new Error('Write the sentence');
+  if (text.startsWith(settings().commands?.prefix || '!')) throw new Error("The sentence can't start with ! (it would look like a command)");
+  if (!(count >= 1)) throw new Error('How many times? 1 to ' + TROLL_MAX);
+  const capped = count > TROLL_MAX;
+  if (capped) count = TROLL_MAX;
+  const [type, ...rest] = to.split(':'); const id = rest.join(':');
+  const name = type === 'group' ? seenGroups().find((g) => g.id === id)?.name || 'group' : contacts().find((c) => c.id === id)?.name || 'contact';
+  const s = clone(settings());
+  s.troll = { ...(s.troll || {}), enabled: true, job: { id: 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), to: { type, id, name }, text, count, at: Date.now() } };
+  await save('settings', s);
+  D = null;
+  toast(`😈 ${count}× to ${name}${capped ? ` (capped at ${TROLL_MAX})` : ''} — goes out within ~4 min`, 'ok');
+  rerender();
 }
 
 let festYear = Math.min(2028, Math.max(2026, new Date().getFullYear()));
@@ -869,19 +920,48 @@ function renderGroups() {
   const cfg = groupsCfg();
   const ids = [...new Set([...seenGroups().map((g) => g.id), ...Object.keys(cfg)])];
   view().innerHTML = `<button class="back" data-act="go" data-v="#/more">‹ More</button>
-  <div class="ph"><div><h1>Group tools</h1><p>Welcome new members, block links, !tagall, !rules</p></div></div>
+  <div class="ph"><div><h1>Group tools</h1><p>Welcome & goodbye, warns, anti-spam, bad words, slow mode, night lock, anti-link</p></div></div>
   <div class="banner warn"><span>⏱</span><div><b>${alwaysOn() ? 'Admin needed' : 'Delayed'}</b>${alwaysOn() ? '' : 'Group tools act on the next check (≈30 min). '}Deleting links or removing people only works where your number is a group admin.</div></div>
-  <p class="hint" style="margin:0 2px 10px">Welcome and anti-link only run in the groups you switch them on for below. Who can use !tagall / !rules is set in Settings → Commands → In groups.</p>
-  <div class="card"><div class="list">${ids.map((id) => { const g = seenGroups().find((x) => x.id === id); const c = cfg[id] || {}; return `<a class="row" href="#/group/${encodeURIComponent(id)}"><div class="ic">👥</div><div class="main"><div class="t">${esc(g?.name || c.name || id)} ${g?.admin ? '<span class="pill ok tiny">admin</span>' : ''}</div><div class="d">${[c.welcome?.enabled && 'welcome', c.antiLink?.enabled && 'anti-link', c.rulesText && 'rules'].filter(Boolean).join(' · ') || 'no tools on'}${g ? ` · ${g.size} members` : ''}</div></div><div class="r">›</div></a>`; }).join('') || '<p class="empty">Your groups show up here after the bot\'s first run.</p>'}</div></div>`;
+  <p class="hint" style="margin:0 2px 10px">Every tool only runs in the groups you switch it on for below. Your admin commands (!kick, !mute, !warn, !lock…) work in any group where your number is admin; switch them on/off in Settings → Commands → Group admin. Who can use !tagall / !rules is set in Settings → Commands → In groups.</p>
+  <div class="card"><div class="list">${ids.map((id) => { const g = seenGroups().find((x) => x.id === id); const c = cfg[id] || {}; return `<a class="row" href="#/group/${encodeURIComponent(id)}"><div class="ic">👥</div><div class="main"><div class="t">${esc(g?.name || c.name || id)} ${g?.admin ? '<span class="pill ok tiny">admin</span>' : ''}</div><div class="d">${[c.welcome?.enabled && 'welcome', c.goodbye?.enabled && 'goodbye', c.antiSpam?.enabled && 'anti-spam', c.badWords?.enabled && 'bad words', c.slow?.enabled && 'slow mode', c.lock?.enabled && 'night lock', c.antiLink?.enabled && 'anti-link', c.rulesText && 'rules'].filter(Boolean).join(' · ') || 'no tools on'}${g ? ` · ${g.size} members` : ''}</div></div><div class="r">›</div></a>`; }).join('') || '<p class="empty">Your groups show up here after the bot\'s first run.</p>'}</div></div>`;
 }
 function renderGroupEditor(id) {
   const g = seenGroups().find((x) => x.id === id);
   const c = groupsCfg()[id] || {};
-  if (!D || D._id !== id) D = { name: g?.name || c.name || '', welcome: { enabled: false, message: 'Welcome {name} to {group}! 👋', ...(c.welcome || {}) }, antiLink: { enabled: false, action: 'warn', warnLimit: 3, allowDomains: [], ...(c.antiLink || {}) }, rulesText: c.rulesText || '', tagallAdminsOnly: c.tagallAdminsOnly !== false, _id: id, _kind: 'group' };
+  if (!D || D._id !== id) D = { name: g?.name || c.name || '', welcome: { enabled: false, message: 'Welcome {name} to {group}! 👋', ...(c.welcome || {}) }, antiLink: { enabled: false, action: 'warn', warnLimit: 3, allowDomains: [], ...(c.antiLink || {}) }, rulesText: c.rulesText || '', tagallAdminsOnly: c.tagallAdminsOnly !== false,
+    goodbye: goodbyeCfgOf(c), warn: { limit: warnLimitOf(c) }, antiSpam: spamCfgOf(c), slow: slowCfgOf(c), badWords: badWordsCfgOf(c),
+    lock: { ...GROUP_ADMIN_DEFAULTS.lock, ...(c.lock || {}), enabled: c.lock?.enabled === true }, _id: id, _kind: 'group' };
+  // !lock / !slow typed in WhatsApp after your last Save here → show (and keep) that value in the form
+  const ov = (status().groupOverrides || {})[id] || {};
+  const cmdVal = (k) => { const e = effectiveSetting(c[k], ov[k], c.savedAt); return e.from === 'command' ? e.value || {} : null; };
+  if (D._id === id && !D._ovApplied) {
+    D._ovApplied = true;
+    const l = cmdVal('lock'), sl = cmdVal('slow');
+    if (l) D.lock = { ...D.lock, ...l, enabled: l.enabled === true };
+    if (sl) D.slow = slowCfgOf({ slow: sl });
+  }
+  const byCmd = (k) => (cmdVal(k) ? '<p class="hint">📱 Set with a command in WhatsApp (shown above). Saving keeps it unless you change it.</p>' : '');
+  const LIM = GROUP_ADMIN_LIMITS;
   view().innerHTML = `<button class="back" data-act="go" data-v="#/groups">‹ Groups</button>
   <div class="ph"><div><h1>${esc(D.name || 'Group')}</h1><p class="mono tiny">${esc(id)}</p></div></div>
   <div class="card">${sw('Welcome new members', 'Mentions them with this message', 'data-f="welcome.enabled"', D.welcome.enabled, delayedPill())}
     <div class="field" style="margin-top:10px"><label for="fGw">Welcome message</label><textarea id="fGw" data-f="welcome.message">${esc(D.welcome.message)}</textarea><p class="hint">{name} = the new member(s), {group} = group name</p></div></div>
+  <div class="card">${sw('Goodbye message', 'When someone leaves or is removed', 'data-f="goodbye.enabled"', D.goodbye.enabled, delayedPill())}
+    <div class="field" style="margin-top:10px"><label for="fGbye">Goodbye message</label><textarea id="fGbye" data-f="goodbye.message">${esc(D.goodbye.message)}</textarea><p class="hint">{name} = who left, {group} = group name</p></div></div>
+  <div class="card"><h2>⚠️ Warnings</h2>
+    <div class="field"><label for="fGwl">Warns before kick</label><input id="fGwl" type="number" min="${LIM.warnMin}" max="${LIM.warnMax}" data-f="warn.limit" data-type="num" value="${esc(D.warn.limit)}"><p class="hint">!warn @user adds one (only you). At this number they are removed. Anti-spam and the bad-word filter add warns too. ${LIM.warnMin}–${LIM.warnMax}, default ${GROUP_ADMIN_DEFAULTS.warn.limit}. Needs your number to be admin.</p></div></div>
+  <div class="card">${sw('Anti-spam', 'Same message again and again → delete those + 1 warn', 'data-f="antiSpam.enabled"', D.antiSpam.enabled, delayedPill())}
+    <div class="grid2" style="margin-top:10px"><div class="field"><label for="fGsc">Same message, times</label><input id="fGsc" type="number" min="${LIM.spamCountMin}" max="${LIM.spamCountMax}" data-f="antiSpam.count" data-type="num" value="${esc(D.antiSpam.count)}"></div><div class="field"><label for="fGss">Within (seconds)</label><input id="fGss" type="number" min="${LIM.spamSecondsMin}" max="${LIM.spamSecondsMax}" data-f="antiSpam.seconds" data-type="num" value="${esc(D.antiSpam.seconds)}"></div></div>
+    <p class="hint">Default: 4 times within 20 seconds. Never you or other admins. Needs admin.</p></div>
+  <div class="card">${sw('Bad-word filter', 'Delete the message + 1 warn', 'data-f="badWords.enabled"', D.badWords.enabled, delayedPill())}
+    <div class="field" style="margin-top:10px"><label for="fGbw">Bad words</label><textarea id="fGbw" data-f="badWords.words" data-type="lines" placeholder="one word per line">${esc((D.badWords.words || []).join('\n'))}</textarea><p class="hint">Whole words only, any case, also catches simple tricks like @ for a, 0 for o, 1 for i. Never you or other admins. Needs admin.</p></div></div>
+  <div class="card">${sw('Slow mode', 'One message per person every few seconds', 'data-f="slow.enabled"', D.slow.enabled, delayedPill())}
+    <div class="field" style="margin-top:10px"><label for="fGsl">Seconds between messages</label><input id="fGsl" type="number" min="${LIM.slowMin}" max="${LIM.slowMax}" data-f="slow.seconds" data-type="num" value="${esc(D.slow.seconds)}"><p class="hint">A 2nd message inside this time is deleted (no warn), with one short 🐢 notice per person per 10 min. ${LIM.slowMin}–${LIM.slowMax}. Same as !slow 30 / !slow off. Never you or other admins. Needs admin.</p></div>
+    ${byCmd('slow')}</div>
+  <div class="card">${sw('Night lock', 'Mute the group every night, open it in the morning', 'data-f="lock.enabled"', D.lock.enabled, delayedPill())}
+    <div class="grid2" style="margin-top:10px"><div class="field"><label for="fGlf">Mute from</label><input id="fGlf" type="time" data-f="lock.from" value="${esc(D.lock.from)}"></div><div class="field"><label for="fGlt">Open at</label><input id="fGlt" type="time" data-f="lock.to" value="${esc(D.lock.to)}"></div></div>
+    <p class="hint">${esc(tz())} time. Only admins can send messages in that time. Same as !lock 23:00-07:00 / !lock off. Needs admin.</p>
+    ${byCmd('lock')}</div>
   <div class="card">${sw('Anti-link', 'Warn people who post links', 'data-f="antiLink.enabled"', D.antiLink.enabled, delayedPill())}
     <div class="field" style="margin-top:10px"><span class="lbl">Action</span>${seg('antiLink.action', [['warn', 'Warn only'], ['delete', 'Delete + warn'], ['remove', 'Delete, remove after limit']], D.antiLink.action)}</div>
     <div class="grid2"><div class="field"><label for="fGl">Warnings before removal</label><input id="fGl" type="number" min="1" data-f="antiLink.warnLimit" data-type="num" value="${esc(D.antiLink.warnLimit)}"></div><div class="field"><label for="fGa">Allowed sites</label><input id="fGa" type="text" data-f="antiLink.allowDomains" data-type="csv" value="${esc((D.antiLink.allowDomains || []).join(', '))}" placeholder="github.com"></div></div></div>
@@ -916,7 +996,7 @@ function renderSettings() {
     ${feat('away', 'Away mode', 'Away message', true)}
     ${feat('ai', 'AI replies', 'Groq, in your style', true)}
     ${feat('botMode', 'VR Bot mode 🤖', '“hey vr bot …” → the bot answers as your assistant (Replies → VR Bot mode)', true)}
-    ${feat('groupTools', 'Group tools', 'Welcome, anti-link, !tagall, !rules', true)}
+    ${feat('groupTools', 'Group tools', 'Welcome, goodbye, anti-spam, bad words, slow mode, anti-link, !tagall, !rules', true)}
     ${feat('commands', 'Commands', '!sticker !pdf !weather !help !yt', true)}
     ${feat('voiceToText', 'Voice note → text', 'Groq Whisper (needs GROQ_API_KEY)', true)}
     ${feat('mediaSave', 'Save incoming media', 'Small files, encrypted, kept on the vr-media branch', true)}
@@ -954,7 +1034,11 @@ function renderSettings() {
     <div class="field"><span class="lbl">Who can use them in private chats</span>${seg('commands.allow', [['owner', 'Only me'], ['contacts', 'My contacts'], ['pick', 'Only these…'], ['everyone', 'Everyone']], whoMode(s.commands.allow))}${whoMode(s.commands.allow) === 'pick' ? peopleChips('commands') : ''}</div>
     <div class="field"><span class="lbl">In groups</span>${groupScope('commands.groups', s.commands.inGroups === false ? 'none' : s.commands.groups, [['none', 'No groups'], ['pick', 'Only these groups'], ['all', 'Any group']], { none: 'Nobody can use commands in groups (except you).', pick: 'Anyone in these groups can use them (!tagall still follows the admin setting in Group tools).', all: 'Any group, but only the people chosen above.' })}<p class="hint">You can always use every command, everywhere.</p></div>
     ${['help', 'weather', 'sticker', 'pdf', 'tagall', 'rules'].map((k) => sw('!' + k, '', `data-f="commands.enabled.${k}"`, s.commands.enabled[k])).join('')}
-    ${sw('!yt (experimental)', 'YouTube often blocks GitHub servers, so this may fail', 'data-f="commands.enabled.yt"', s.commands.enabled.yt)}</div>
+    ${sw('!yt (experimental)', 'YouTube often blocks GitHub servers, so this may fail', 'data-f="commands.enabled.yt"', s.commands.enabled.yt)}
+    ${sw('!report', 'Anyone in a group replies to a message with !report → you get it in your own chat (groups where you are admin, max 5/person/hour)', 'data-f="commands.enabled.report"', s.commands.enabled.report !== false)}
+    <h3 style="margin:14px 0 4px">👮 Group admin (only you)</h3>
+    <p class="hint">Type them inside the group. They work where your number is a group admin; otherwise the bot says "I need admin in this group for that".</p>
+    ${[['kick', '!kick @user (or reply)'], ['add', '!add 91XXXXXXXXXX'], ['mute', '!mute · !mute 30m · !unmute'], ['del', '!del (reply → delete for everyone)'], ['warn', '!warn · !warns · !unwarn'], ['link', '!link · !resetlink'], ['setname', '!setname <name>'], ['setdesc', '!setdesc <text>'], ['lock', '!lock 23:00-07:00 · !lock off'], ['slow', '!slow 30 · !slow off'], ['pin', '!pin (reply) · !unpin'], ['poll', '!poll Question | a | b'], ['summary', '!summary (AI, uses your Groq limit)']].map(([k, t]) => sw(t, '', `data-f="commands.enabled.${k}"`, s.commands.enabled[k] !== false)).join('')}</div>
   <div class="card"><h2>🎤 Voice notes</h2><div class="field"><span class="lbl">Send the transcript to</span>${seg('voice.sendTo', [['owner', 'Me (private)'], ['chat', 'Reply in that chat']], s.voice.sendTo)}</div>
     <div class="field"><span class="lbl">Whose voice notes</span>${seg('voice.who', [['everyone', 'Everyone'], ['contacts', 'My contacts'], ['pick', 'Only these…']], whoMode(s.voice.who))}${whoMode(s.voice.who) === 'pick' ? peopleChips('voice') : ''}<p class="hint">Private chats only.</p></div></div>
   <div class="card"><h2>💾 Saved media</h2>
@@ -1605,7 +1689,7 @@ const routes = [
   [/^#\/groups$/, renderGroups, 'more'], [/^#\/group\/(.+)$/, (id) => renderGroupEditor(decodeURIComponent(id)), 'more'],
   [/^#\/settings$/, renderSettings, 'more'], [/^#\/logs$/, renderLogs, 'more'], [/^#\/status$/, renderStatus, 'more'],
   [/^#\/notify$/, renderNotify, 'more'], [/^#\/sent$/, renderSent, 'more'], [/^#\/voice$/, renderVoice, 'more'],
-  [/^#\/notes$/, renderNotes, 'more'], [/^#\/appearance$/, renderAppearance, 'more'],
+  [/^#\/notes$/, renderNotes, 'more'], [/^#\/appearance$/, renderAppearance, 'more'], [/^#\/troll$/, renderTroll, 'more'],
 ];
 function route() {
   const h = location.hash || '#/home';
@@ -1650,7 +1734,7 @@ async function onClick(e) {
     if (f === 'logTab') { logTab = v; renderLogs(); return; }
     if (f === 'sentCat') { sentCat = v; renderSent(); return; }
     if (f === 'festYear') { festYear = Number(v); renderFestivals(); return; }
-    if (D) { setPath(D, f, f === 'repeat.type' ? v : v); if (f === 'repeat.type') D.repeat = { type: v, ...(v === 'once' ? { date: localDate(Date.now(), tz()) } : v === 'weekly' ? { days: [1, 2, 3, 4, 5] } : v === 'monthly' ? { day: 1 } : v === 'yearly' ? { month: new Date().getMonth() + 1, day: new Date().getDate() } : v === 'dates' ? { dates: [] } : {}) }; rerender(); }
+    if (D) { setPath(D, f, f === 'ai.groupReplyAll' ? v === 'true' : v); if (f === 'repeat.type') D.repeat = { type: v, ...(v === 'once' ? { date: localDate(Date.now(), tz()) } : v === 'weekly' ? { days: [1, 2, 3, 4, 5] } : v === 'monthly' ? { day: 1 } : v === 'yearly' ? { month: new Date().getMonth() + 1, day: new Date().getDate() } : v === 'dates' ? { dates: [] } : {}) }; rerender(); }
     return;
   }
   const a = b.dataset.act;
@@ -1680,6 +1764,7 @@ async function onClick(e) {
       case 'push-enable': await enablePush(); D = null; rerender(); break;
       case 'push-off': if (confirm('Stop notifications on this phone?')) { await disablePushHere(); D = null; rerender(); } break;
       case 'push-test': await testPush(); break;
+      case 'troll-send': await trollSend(); break;
       case 'push-rm': { const s = settings(); const d = (s.notify.devices || []).find((x) => x.id === b.dataset.id); if (!d || !confirm(`Remove ${d.name || 'this phone'}? It stops getting notifications.`)) break; if (d.endpoint === pushHere.endpoint) { await disablePushHere(); } else { s.notify.devices = s.notify.devices.filter((x) => x.id !== d.id); await save('settings', s); } D = null; rerender(); break; }
       case 'notify-save': { const s = settings(); s.notify = { ...s.notify, enabled: !!D.enabled, kinds: { ...s.notify.kinds, ...D.kinds }, selfReports: !!D.selfReports }; await save('settings', s); D = null; rerender(); break; }
       case 'run-now': await api.dispatch({ action: 'run' }); toast('Started ✓ — the bot runs in 1–3 min', 'ok'); break;
@@ -1807,7 +1892,13 @@ async function onClick(e) {
       case 'f-del': if (confirm('Delete this occasion?')) { const fc = clone(festCfg()); fc.custom = (fc.custom || []).filter((x) => x.id !== D.id); await save('festivals', fc); D = null; location.hash = '#/festivals'; } break;
       case 't-save': if (!D.name.trim() || !D.text.trim()) throw new Error('Name and text are required'); await saveList('templates', 'templates', replaceIn(templates(), strip(D))); D = null; location.hash = '#/templates'; break;
       case 't-del': if (confirm('Delete this template?')) { await saveList('templates', 'templates', templates().filter((x) => x.id !== D.id)); D = null; location.hash = '#/templates'; } break;
-      case 'g-save': { const g = clone(groupsCfg()); const item = strip(D); g[D._id] = item; await save('groups', { ...(S.files.groups?.data || {}), groups: g }); D = null; location.hash = '#/groups'; break; }
+      case 'g-save': {
+        const g = clone(groupsCfg()); const item = strip(D);
+        if (item.lock?.enabled && (!isValidTime(item.lock.from) || !isValidTime(item.lock.to) || item.lock.from === item.lock.to)) { toast('Night lock: pick two different times', 'bad'); break; }
+        // keep numbers in range (empty → default)
+        item.warn = { limit: warnLimitOf(item) }; item.antiSpam = spamCfgOf(item); item.slow = slowCfgOf(item); item.badWords = badWordsCfgOf(item); item.goodbye = goodbyeCfgOf(item);
+        delete item._ovApplied; item.savedAt = Date.now(); // newest wins vs !lock / !slow typed in WhatsApp
+        g[D._id] = item; await save('groups', { ...(S.files.groups?.data || {}), groups: g }); D = null; location.hash = '#/groups'; break; }
       case 'media': {
         const mv = $('#mediaView'); mv.innerHTML = '<p class="muted">Decrypting…</p>';
         const { bytes, mimetype } = await api.readMedia(b.dataset.path);

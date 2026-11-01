@@ -18,7 +18,7 @@ export function emptyState() {
     sentlog: { entries: {} },
     logs: { entries: [] },
     outbox: { entries: [] }, // 📤 Sent log: everything the bot sent (panel → More → Sent log)
-    memory: { cooldowns: {}, ai: {}, aiCount: {}, lastIn: {}, lastOut: {}, followed: {}, awaySent: {}, github: {}, ntfy: {}, processed: [], warns: {}, pdf: {}, broadcast: { date: null, n: 0 }, sentIds: [], lastPollAt: 0 },
+    memory: { cooldowns: {}, ai: {}, aiCount: {}, lastIn: {}, lastOut: {}, lastOutGroup: {}, aiGroupLast: {}, followed: {}, awaySent: {}, github: {}, ntfy: {}, processed: [], warns: {}, pdf: {}, broadcast: { date: null, n: 0 }, sentIds: [], lastPollAt: 0 },
   };
 }
 
@@ -107,6 +107,11 @@ export function prune(st) {
   m.sentIds = (m.sentIds || []).slice(-500);
   for (const [k, v] of Object.entries(m.cooldowns || {})) if (v < Date.now() - 7 * 86400000) delete m.cooldowns[k];
   for (const [k, v] of Object.entries(m.ai || {})) m.ai[k] = (v || []).slice(-20);
+  for (const o of [m.groqLimit, m.botLimitTold, m.aiGroupLast, m.lastOutGroup]) for (const [k, v] of Object.entries(o || {})) if ((v || 0) < Date.now() - 7 * 86400000) delete o[k];
+  // 👮 group admin bookkeeping (no message text): slow-mode notices, !report limits
+  for (const [k, v] of Object.entries(m.slowNotice || {})) if ((v || 0) < Date.now() - 86400000) delete m.slowNotice[k];
+  for (const [k, v] of Object.entries(m.reports || {})) { const r = (v || []).filter((t) => t > Date.now() - 3600000); if (r.length) m.reports[k] = r; else delete m.reports[k]; }
+  if (m.reported) m.reported = m.reported.slice(-300);
 }
 
 export { isEnvelope };

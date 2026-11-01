@@ -1,18 +1,22 @@
-// VR Bot — group tools: welcome, anti-link, !tagall, !rules. © VR DEVELOPMENTS
+// VR Bot — group tools: welcome, goodbye, anti-link, !tagall, !rules (admin commands: admin.js). © VR DEVELOPMENTS
 import { renderTemplate } from '../../panel/shared/templates.js';
 import { jidNumber, jidNormalizedUser } from '../wa.js';
+import { goodbyeCfgOf } from '../../panel/shared/groupadmin.js';
+
+const META_TTL = 5 * 60000; // group info (who is admin) is re-read at most every 5 min; admin commands always read it fresh
 
 const LINK_RE = /(https?:\/\/|www\.|chat\.whatsapp\.com\/|wa\.me\/|t\.me\/)[^\s]*/i;
 
 export class GroupTools {
-  constructor(wa, ctx) { this.wa = wa; this.ctx = ctx; this.meta = new Map(); }
+  constructor(wa, ctx) { this.wa = wa; this.ctx = ctx; this.meta = new Map(); this.metaAt = new Map(); }
 
-  async metadata(jid) {
-    if (this.meta.has(jid)) return this.meta.get(jid);
+  async metadata(jid, { fresh = false } = {}) {
+    if (!fresh && this.meta.has(jid) && Date.now() - (this.metaAt.get(jid) || 0) < META_TTL) return this.meta.get(jid);
     const m = await this.wa.sock.groupMetadata(jid);
-    this.meta.set(jid, m);
+    this.meta.set(jid, m); this.metaAt.set(jid, Date.now());
     return m;
   }
+  forget(jid) { this.meta.delete(jid); this.metaAt.delete(jid); }
   myIds() {
     const u = this.wa.sock?.user || {};
     return [u.id, u.lid].filter(Boolean).map((x) => jidNormalizedUser(x));
@@ -32,6 +36,19 @@ export class GroupTools {
     const names = participantJids.map((j) => '@' + (jidNumber(j) || j.split('@')[0])).join(' ');
     const text = renderTemplate(cfg.welcome.message || 'Welcome {name} to {group}! 👋', { name: names, group: meta.subject }, groupJid);
     await this.ctx.send(groupJid, { text, mentions }, { kind: 'group', cat: 'replies' });
+    return 1;
+  }
+
+  /** 👋 Goodbye message when someone leaves or is removed (per-group switch + text in the panel). */
+  async goodbye(groupJid, participantJids) {
+    const cfg = goodbyeCfgOf(this.ctx.groupsCfg[groupJid]);
+    const ids = participantJids.filter((j) => !this.myIds().includes(jidNormalizedUser(j)));
+    if (!cfg.enabled || !ids.length) return 0;
+    this.forget(groupJid);
+    const meta = await this.metadata(groupJid).catch(() => ({ subject: 'the group', participants: [] }));
+    const names = ids.map((j) => '@' + (jidNumber(j) || j.split('@')[0])).join(' ');
+    const text = renderTemplate(cfg.message, { name: names, group: meta.subject }, groupJid);
+    await this.ctx.send(groupJid, { text, mentions: ids }, { kind: 'group', cat: 'replies' });
     return 1;
   }
 

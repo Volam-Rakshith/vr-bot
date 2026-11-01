@@ -88,10 +88,26 @@ export function helpText(s, isOwner) {
   if (en.yt) lines.push(`${p}yt <link> — YouTube audio (experimental)`);
   if (en.tagall) lines.push(`${p}tagall <msg> — mention everyone (group admins)`);
   if (en.rules) lines.push(`${p}rules — group rules`);
+  if (en.report !== false) lines.push(`${p}report — reply to a message to report it to the admin (groups)`);
   if (en.projects !== false) lines.push(`${p}projects — ${brandOf(s).owner}'s projects (${brandOf(s).company}) · ${p}project <name>`);
   lines.push(`${p}help — this list`);
   lines.push(...botHelpLines(s));
   if (isOwner) lines.push('', '*Owner:*', `${p}away <msg> · ${p}back · ${p}status · ${p}pause · ${p}resume · ${p}text (reply to a voice note)`, `${p}busy 2h · ${p}busy until 5pm · ${p}busy off`, `${p}class 2h · ${p}class till 4 · ${p}class (1h) · ${p}free (ends busy/class)`, `${p}voice save <name> (reply to a voice note) · ${p}voice list · ${p}voice play <name> · ${p}voice delete <name>`, `${p}note <text> (or reply ${p}note to any message) · ${p}notes · ${p}notes <word> · ${p}note delete <n>`);
+  if (isOwner) {
+    // 👮 group admin (owner only): type them inside the group; your number must be a group admin
+    const a = (k, txt) => (en[k] !== false ? txt : null);
+    const adm = [
+      a('kick', `${p}kick @user (or reply)`), a('add', `${p}add 91XXXXXXXXXX`),
+      a('mute', `${p}mute · ${p}mute 30m / 2h · ${p}unmute`), a('del', `${p}del (reply → delete for everyone)`),
+      a('warn', `${p}warn @user (or reply) · ${p}warns @user · ${p}unwarn @user`),
+      a('link', `${p}link · ${p}resetlink`), a('setname', `${p}setname <name>`), a('setdesc', `${p}setdesc <text>`),
+      a('lock', `${p}lock 23:00-07:00 · ${p}lock off`), a('slow', `${p}slow 30 · ${p}slow off`),
+      a('pin', `${p}pin (reply; 24h/7d/30d) · ${p}unpin (reply)`), a('poll', `${p}poll Question | option 1 | option 2`),
+      a('summary', `${p}summary · ${p}summary 100 · ${p}summary here`),
+    ].filter(Boolean);
+    if (adm.length) lines.push('', '👮 *Group admin* (only you, inside the group, needs admin):', ...adm);
+  }
+  if (isOwner && s.troll?.enabled !== false) lines.push(`😈 ${p}troll <count> <text> (type it in the chat) · ${p}troll @<group/contact> <count> <text> · ${p}troll stop — max 50`);
   lines.push('', `— ${s.botName || 'VR Bot'} by ${brandOf(s).company}`);
   return lines.join('\n');
 }

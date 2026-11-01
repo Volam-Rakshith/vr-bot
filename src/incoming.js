@@ -15,11 +15,14 @@ import { voicePlan, ruleCooldown, pttContent, parseVoiceCommand, voiceListText, 
 import { isJidGroup, jidNumber, numberJid } from './wa.js';
 import { log } from './log.js';
 import { aiReply, transcribe } from './features/ai.js';
+import { useLimitStore, limitedUntil, humanTime } from './features/groqlimit.js';
+import { Troll, parseTroll, resolveTarget, usageText, clampCount, TROLL_LIMITS } from './features/troll.js';
 import { botCfg, botScope, detectTrigger, botIntent, botAllowed, botCount, GROQ_HELP, BOT_LIMITS } from '../panel/shared/botmode.js';
 import { answerBot } from './features/botmode.js';
 import { projectsOf, promoLine, projectsCommand, MORE_RE } from '../panel/shared/projects.js';
 import { weather, toSticker, imagesToPdf, ytAudio, helpText } from './features/commands.js';
 import { GroupTools } from './features/groups.js';
+import { GroupAdmin } from './features/admin.js';
 import { env } from './env.js';
 
 // Reactions, deleted/edited messages and other system messages are never answered. Stickers, GIFs,
@@ -38,6 +41,46 @@ export function isAwayActive(settings, status, nowMs) {
   return inDailyWindow(localTime(nowMs, settings.timezone), w.from, w.to);
 }
 
+/** Replies → AI in groups → "In these groups reply to: Every message" (off by default). */
+export const groupReplyAll = (S) => S.ai?.groupReplyAll === true || S.ai?.groupReplyAll === 'true';
+/** Wait between AI replies in one group with "Every message" (seconds in settings, at least 15, default 60). */
+export function groupCooldownMs(S) {
+  const n = Number(S.ai?.groupCooldownSec);
+  return Math.max(15, Number.isFinite(n) && n > 0 ? n : 60) * 1000;
+}
+/** A message that is itself a bot's reply (this bot's header, 🤖 or "… is sending:" in the first line) → never answered by the AI or VR Bot mode (no bot-to-bot loops). */
+export function looksLikeBot(text, S = {}) {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  const head = String(S.header?.text || '').trim();
+  if (head && t.startsWith(head)) return true;
+  const first = t.split('\n')[0];
+  return first.includes('🤖') || /is sending:/i.test(first); // e.g. "🤖 *Rak Bot* is sending:\nDid it sleep 😴"
+}
+
+/** Group AI replies: at most 2 lines, and no "Name:" the model may have copied from the group format. */
+export function shortForGroup(answer, myName = '') {
+  let a = String(answer || '').trim();
+  const nm = String(myName || '').trim();
+  if (nm) {
+    const esc = nm.replace(/[.*+?^$|()[\]{}\\]/g, '\\$&');
+    a = a.replace(new RegExp('^\\*?' + esc + '\\*?\\s*:\\s*', 'i'), '');
+  }
+  return a.split('\n').map((l) => l.trim()).filter(Boolean).slice(0, 2).join('\n');
+}
+
+/**
+ * Group join/leave participants → jids. Baileys 7 gives objects ({ id, phoneNumber }) in the event and JSON
+ * strings in the system message; both become the phone-number jid when known, so one join/leave = one key.
+ */
+export function participantJids(list) {
+  return (list || []).map((p) => {
+    let o = p;
+    if (typeof p === 'string' && p.trim().startsWith('{')) { try { o = JSON.parse(p); } catch { o = p; } }
+    return typeof o === 'string' ? o : (o?.phoneNumber || o?.id || '');
+  }).filter(Boolean);
+}
+
 /** Who/where a message came from, for the per-chat controls (panel/shared/rules.js → inScope). */
 function scopeCtx(it) {
   return { isGroup: !!it.isGroup, groupId: it.isGroup ? it.chat : undefined, contactId: it.contact?.id, tags: it.contact?.tags || [] };
@@ -49,17 +92,36 @@ export class Incoming {
     this.queue = [];
     this.recentImages = new Map(); // chat → [WAMessage] (for !pdf)
     this.groups = null;
+    this.trollOpts = {}; // tests: { sleep, rand }
+    this._troll = null;
+    this._admin = null;
+  }
+  /** 👮 group admin commands + anti-spam / bad words / slow mode / night lock / mute timer (features/admin.js) */
+  get admin() {
+    if (!this._admin) this._admin = new GroupAdmin(this);
+    return this._admin;
+  }
+  /** Run loop: !mute 30m timers and the night lock. */
+  async adminTick() { await this.admin.tick().catch((e) => log.warn(`group admin: ${e.message}`)); }
+  /** 😈 Troll mode runner (one burst at a time). Its sends are "quiet" (kind troll): no daily caps, one summary for you. */
+  get troll() {
+    if (!this._troll) this._troll = new Troll({ send: (jid, text) => this.send(jid, { text }, { kind: 'troll', quiet: true }), mem: this.state.memory, ...this.trollOpts });
+    return this._troll;
   }
   push(m) { for (const msg of m.messages || []) this.queue.push(msg); }
   async participants(u) {
-    if (u.action !== 'add') return;
+    if (this.groups) this.groups.forget(u.id); // someone joined/left/was made admin → read the group info again
+    if (u.action !== 'add' && u.action !== 'remove') return;
     const data = this.getData();
     if (!data.settings.features.groupTools) return;
-    const ids = (u.participants || []).map((p) => (typeof p === 'string' ? p : p.id)).filter(Boolean);
+    const ids = participantJids(u.participants);
+    if (!ids.length) return;
     const key = `${u.id}|${ids.join(',')}|${localDate(Date.now(), data.settings.timezone)}`;
-    if (this.state.memory.processed.includes('w:' + key)) return;
-    this.state.memory.processed.push('w:' + key);
-    await this.tools().welcome(u.id, ids).catch((e) => log.warn(`welcome failed: ${e.message}`));
+    const tag = u.action === 'add' ? 'w:' : 'b:';
+    if (this.state.memory.processed.includes(tag + key)) return;
+    this.state.memory.processed.push(tag + key);
+    if (u.action === 'add') await this.tools().welcome(u.id, ids).catch((e) => log.warn(`welcome failed: ${e.message}`));
+    else await this.tools().goodbye(u.id, ids).catch((e) => log.warn(`goodbye failed: ${e.message}`)); // 👋 left / removed
   }
   tools() {
     const data = this.getData();
@@ -74,6 +136,7 @@ export class Incoming {
     const batch = this.queue.splice(0, this.queue.length);
     const data = this.getData();
     const S = data.settings, F = S.features, mem = this.state.memory, now = Date.now();
+    useLimitStore(mem); // Groq "limit reached" times live in memory (no calls until they reset)
     const processed = new Set(mem.processed);
     const sentIds = new Set(mem.sentIds);
     const me = this.wa.me();
@@ -109,6 +172,8 @@ export class Incoming {
       }
       it.contact = contactsByNum.get(it.senderNum) || null;
       it.selfChat = !isGroup && (this.wa.isMe(chat) || (!!it.senderNum && it.senderNum === me));
+      // groups: when did YOU last post there (the bot's own sends are skipped above) → "reply to every message" waits for you
+      if (isGroup && it.fromMe) { mem.lastOutGroup = mem.lastOutGroup || {}; mem.lastOutGroup[chat] = Math.max(mem.lastOutGroup[chat] || 0, ts); }
       if (!isGroup && !it.selfChat && it.senderNum) {
         if (it.fromMe) mem.lastOut[it.senderNum] = Math.max(mem.lastOut[it.senderNum] || 0, ts);
         else mem.lastIn[it.senderNum] = Math.max(mem.lastIn[it.senderNum] || 0, ts);
@@ -143,6 +208,11 @@ export class Incoming {
           if (now - it.ts < maxAge) await this.participants({ id: it.chat, action: 'add', participants: it.msg.messageStubParameters || [] });
           continue;
         }
+        // group "left" / "removed" system messages → goodbye
+        if (it.isGroup && F.groupTools && [WAMessageStubType.GROUP_PARTICIPANT_LEAVE, WAMessageStubType.GROUP_PARTICIPANT_REMOVE].includes(it.msg.messageStubType)) {
+          if (now - it.ts < maxAge) await this.participants({ id: it.chat, action: 'remove', participants: it.msg.messageStubParameters || [] });
+          continue;
+        }
         if (!it.type || IGNORE.has(it.type)) continue;
         const fresh = now - it.ts < maxAge;
         const prefix = S.commands?.prefix || '!';
@@ -151,16 +221,24 @@ export class Incoming {
         // Every feature below only acts in the chats/groups picked for it in the panel (see inScope).
         const sc = scopeCtx(it);
         if (F.commands && (isOwner || inScope(featureScope(S, 'commands'), sc))) this.noteImage(it);
+        if (it.isGroup && !isCmd && fresh) this.admin.record(it, S); // !summary: recent group text, memory only (never saved)
 
         if (!it.fromMe && F.mediaSave && S.media?.chats && inScope(featureScope(S, 'media'), sc)) await this.saveMedia(it, S, false);
 
         if (it.fromMe) {
           if (isCmd && fresh) await this.command(it, S, F, true);
-          // 🤖 test VR Bot mode yourself: "vr bot …" in your own chat (no caps, any scope)
-          else if (fresh && it.selfChat && F.botMode) { const trig = this.botTrigger(it, S); if (trig) await this.botMode(it, data, trig, null); }
+          // 🤖 VR Bot mode for YOU: "vr bot …" in your own chat (testing: no caps, any scope) or in any chat/group
+          // picked for VR Bot mode (the answer goes to that chat, so friends see it; no daily cap for you).
+          // Never a message the bot sent itself (its ids are skipped above; 🤖-text is skipped here) → no loops.
+          else if (fresh && F.botMode && !it.text.startsWith('🤖')) {
+            const trig = this.botTrigger(it, S);
+            if (trig && (it.selfChat || (trig.trigger !== 'more' && inScope(botScope(S), sc)))) await this.botMode(it, data, trig, null);
+          }
           continue;
         }
         if (!fresh) continue;
+        // 🚫 anti-spam / 🤬 bad words / 🐢 slow mode (groups where you're admin; never you or other admins)
+        if (it.isGroup && F.groupTools && await this.admin.guard(it, S, isOwner).catch((e) => { log.warn(`group guard: ${e.message}`); return false; })) continue;
         if (isCmd && F.commands && (it.kind === 'message' || it.kind === 'gif')) { await this.command(it, S, F, isOwner); continue; }
         // 🤖 VR Bot mode: "hey vr bot …" is for the bot itself (assistant persona). Comes before busy/class,
         // keyword rules, away and the "as you" AI — a question asked TO the bot should get the bot's answer.
@@ -175,7 +253,10 @@ export class Incoming {
           if (botTrig && await this.botMode(it, data, botTrig, busy)) continue;
           if (canReply && busy.active && await this.busyReply(it, S, busy, true)) continue;
           if (F.autoReply && canReply && it.text && await this.autoReply(it, data, true)) continue;
-          if (F.ai && canReply && it.aiText && inScope(featureScope(S, 'ai'), sc) && this.talksToMe(it)) aiQueue.set(it.chat, it); // picked groups: only when @mentioned / replied to
+          if (F.ai && canReply && it.aiText && !looksLikeBot(it.text, S) && inScope(featureScope(S, 'ai'), sc)) {
+            if (this.talksToMe(it)) aiQueue.set(it.chat, it); // picked groups: when @mentioned / replied to
+            else if (groupReplyAll(S) && this.groupAiOk(it, S, now)) aiQueue.set(it.chat, it); // "Every message" (latest one per group)
+          }
           continue;
         }
         // private chat
@@ -185,7 +266,7 @@ export class Incoming {
         if (canReply && busy.active && await this.busyReply(it, S, busy, false)) continue;
         if (F.autoReply && canReply && it.text && await this.autoReply(it, data, false)) continue;
         if ((it.kind === 'message' || canReply) && isAwayActive(S, this.state.status, now) && inScope(featureScope(S, 'away'), sc)) { await this.away(it, S); continue; }
-        if (F.ai && canReply && it.aiText && inScope(featureScope(S, 'ai'), sc)) aiQueue.set(it.chat, it); // one AI reply per chat, to the latest message
+        if (F.ai && canReply && it.aiText && !looksLikeBot(it.text, S) && inScope(featureScope(S, 'ai'), sc)) aiQueue.set(it.chat, it); // one AI reply per chat, to the latest message (never to another bot)
       } catch (e) {
         log.warn(`Could not handle a message: ${e.message}`);
       }
@@ -212,6 +293,7 @@ export class Incoming {
   /** 🤖 Is this message addressed to the bot ("hey vr bot …", "@VR bot …")? → { question } or null. */
   botTrigger(it, S) {
     if (it.kind !== 'message' || !it.text) return null;
+    if (looksLikeBot(it.text, S)) return null; // another bot's message (or this bot's own) → never a question for VR Bot
     const ci = it.content?.[it.type]?.contextInfo || it.content?.extendedTextMessage?.contextInfo || {};
     const mentionedMe = (ci.mentionedJid || []).some((j) => this.wa.isMe(j));
     const t = detectTrigger(it.text, botCfg(S).triggers, { mentionedMe });
@@ -272,11 +354,19 @@ export class Incoming {
     } : null;
     const hk = `bot:${it.chat}`;
     const hist = (mem.ai && mem.ai[hk]) || [];
-    const res = await answerBot({ S, cfg, intent, question: trig.question, history: hist, isGroup: it.isGroup, image, who: it.isGroup ? '' : firstName(it.contact?.name || it.msg?.pushName || '') });
-    if (!owner && !moreList) botCount(mem, { chat: it.chat, person, now });
+    const res = await answerBot({ S, cfg, intent, question: trig.question, history: hist, isGroup: it.isGroup, image, who: it.isGroup || it.fromMe ? '' : firstName(it.contact?.name || it.msg?.pushName || '') });
+    if (res.limited) {
+      // Groq's free limit is used up: tell this chat ONCE per limit window, then stay quiet (fixed-text answers still go out)
+      mem.botLimitTold = mem.botLimitTold || {};
+      if ((mem.botLimitTold[it.chat] || 0) > now) res.out = [];
+      else mem.botLimitTold[it.chat] = res.limited;
+      log.info(`VR Bot mode: Groq limit used up (resets in ~${humanTime(res.limited - now)})${res.out.length ? '' : ', already told this chat'}`);
+      if (!res.out.length) return true;
+    }
+    if (!owner && !moreList && !res.limited) botCount(mem, { chat: it.chat, person, now });
     // 💡 answered a question on one of VR's project topics → ONE "btw VR built … for this → link" line
     // (only here in VR Bot mode — never in the normal "as VR" replies; max once per chat per project per day)
-    if (cfg.promo !== false && !res.error && ['chat', 'web', 'link', 'vision'].includes(intent.type) && trig.question) {
+    if (cfg.promo !== false && !res.error && !res.limited && ['chat', 'web', 'link', 'vision'].includes(intent.type) && trig.question) {
       const outs = res.out || [];
       const line = promoLine(mem, S, { question: trig.question, chat: it.chat, day, everyDays: cfg.promoEveryDays, answer: outs.map((o) => o.text || o.caption || '').join('\n') });
       if (line) {
@@ -301,6 +391,18 @@ export class Incoming {
     }
     log.info(`VR Bot mode (${intent.type}) answered ${owner ? 'you' : it.isGroup ? 'a group' : maskNumber(it.senderNum)}`);
     return true;
+  }
+
+  /**
+   * AI in groups → "Every message": may this plain group message (no @mention) get an AI reply?
+   * Not a bot's message (🤖 / the bot header → no loops with other bots), you haven't posted in the group
+   * since, and the group's cooldown (Replies → "Wait between replies in a group") has passed.
+   */
+  groupAiOk(it, S, now = Date.now()) {
+    const mem = this.state.memory;
+    if (looksLikeBot(it.text, S)) return false;
+    if (S.replies?.skipIfIReplied !== false && (mem.lastOutGroup?.[it.chat] || 0) > it.ts) return false; // you already said something there
+    return now - (mem.aiGroupLast?.[it.chat] || 0) >= groupCooldownMs(S);
   }
 
   /** Did this group message @mention me or reply to one of my messages? */
@@ -544,9 +646,11 @@ export class Incoming {
   }
 
   async ai(it, data) {
-    const A = data.settings.ai || {};
+    const S = data.settings, A = S.ai || {};
     const mem = this.state.memory;
     if (!inScope(featureScope(data.settings, 'ai'), scopeCtx(it))) return; // safety net: never outside the picked chats
+    const lim = limitedUntil('main');
+    if (lim) { await this.aiLimitNotice(lim); return; } // Groq limit used up → no call, no message to the friend
     const day = localDate(Date.now(), data.settings.timezone);
     const ck = `${day}|${it.chat}`;
     mem.aiCount[ck] = (mem.aiCount[ck] || 0) + 1;
@@ -558,12 +662,95 @@ export class Incoming {
       const emoji = pickReaction(await aiReply(ask, data.settings.myName, [], it.aiText || it.text).catch(() => ''));
       await this.react(it, emoji).catch(() => {});
     }
-    const said = it.aiText || it.text;
-    const answer = await aiReply(A, data.settings.myName, hist.slice(-(A.memory || 8)), said);
+    let said = it.aiText || it.text;
+    let opts = {};
+    if (it.isGroup) {
+      if (S.replies?.skipIfIReplied !== false && (mem.lastOutGroup?.[it.chat] || 0) > it.ts) return; // you posted in the group since
+      const from = it.contact?.name || it.msg?.pushName || '';
+      opts = { group: true, groupName: this.state.status.groups?.find((g) => g.id === it.chat)?.name || '', from };
+      if (from) said = `${from}: ${said}`;
+    }
+    let answer;
+    try { answer = await aiReply(A, data.settings.myName, hist.slice(-(A.memory || 8)), said, opts); } catch (e) {
+      if (e.rateLimit) { mem.aiCount[ck]--; await this.aiLimitNotice(e.until); return; } // never a "limit" message in your name
+      throw e;
+    }
+    if (it.isGroup) answer = shortForGroup(answer, data.settings.myName);
     if (!answer) return;
     await this.reply(it, answer, 'ai');
+    if (it.isGroup) { mem.aiGroupLast = mem.aiGroupLast || {}; mem.aiGroupLast[it.chat] = Date.now(); }
     mem.ai[it.chat] = [...hist, { role: 'them', text: said }, { role: 'me', text: answer }].slice(-20);
-    log.info(`AI replied to ${maskNumber(it.senderNum)}`);
+    log.info(`AI replied to ${it.isGroup ? 'a group' : maskNumber(it.senderNum)}`);
+  }
+
+  /** "As VR" AI hit Groq's limit: friends get nothing; YOU get one notification per limit window. */
+  async aiLimitNotice(until) {
+    const mem = this.state.memory, now = Date.now();
+    log.info(`AI reply skipped: Groq limit reached, resets in ~${humanTime(until - now)}`);
+    if ((mem.aiLimitTold || 0) > now) return;
+    mem.aiLimitTold = until;
+    await this.toOwner(`⚠️ AI replies paused: Groq limit reached, resets in ~${humanTime(until - now)}. Friends get no AI reply until then (nothing is sent in your name).`, { report: true, title: 'AI replies paused' }).catch(() => {});
+  }
+
+  /** Name of a chat for messages to you ("👥 AIML" / "Ravi"). */
+  chatName(jid) {
+    if (isJidGroup(jid)) return `👥 ${this.state.status.groups?.find((g) => g.id === jid)?.name || 'group'}`;
+    const num = jidNumber(jid);
+    return this.getData().contacts.find((c) => normalizeNumber(c.number) === num)?.name || maskNumber(num);
+  }
+
+  /** Start a troll burst and tell YOU (privately) how it went. tell(text) = your own chat / notification. */
+  startTroll(jid, text, count, tell, { capped = false, announce = false } = {}) {
+    const name = this.chatName(jid);
+    const r = this.troll.start(jid, text, count);
+    if (r.error === 'busy') return tell(`😈 A troll burst is already running. Send ${this.getData().settings.commands?.prefix || '!'}troll stop first.`);
+    if (r.error === 'rate') return tell(`⏳ Troll mode: max ${TROLL_LIMITS.maxBursts} bursts per 10 min (so WhatsApp doesn't ban your number). Try again in ~${humanTime(r.waitMs)}.`);
+    const n = clampCount(count).count;
+    if (capped || announce) tell(`😈 Sending ${n}× to ${name}${capped ? ` (capped at ${TROLL_LIMITS.maxCount})` : ''}…`);
+    log.info(`Troll mode: ${n}× to ${isJidGroup(jid) ? 'a group' : maskNumber(jidNumber(jid))}`);
+    r.done.then((x) => {
+      this.state.status.troll = { to: name, sent: x.sent, count: x.count, stopped: x.stopped, error: x.error || null, at: Date.now() };
+      return tell(`😈 Troll: ${x.sent}/${x.count} sent to ${name}${x.stopped ? ' (stopped)' : ''}${x.error ? ` — stopped on an error: ${x.error}` : ''}`);
+    }).catch(() => {});
+    return r;
+  }
+
+  /** !troll — owner only (see src/features/troll.js). Feedback goes to YOUR chat, never into the trolled chat. */
+  async trollCommand(it, S, arg, prefix) {
+    const tell = (t) => (it.selfChat ? this.reply(it, t, 'alert') : this.toOwner(t, { report: true, title: 'Troll mode' })).catch(() => {});
+    if (S.troll?.enabled === false) return tell('😈 Troll mode is off. Panel → More → 😈 Troll mode to switch it on.');
+    const p = parseTroll(arg);
+    if (p.stop) return tell(this.troll.stop() ? '🛑 Troll stopped.' : 'Nothing is running.');
+    if (p.error) return tell(usageText(prefix));
+    if (p.text.startsWith(prefix)) return tell(`😈 The text can't start with ${prefix} (it would look like a command).`);
+    let jid = it.chat;
+    if (p.target) {
+      const r = resolveTarget(p.target, { groups: this.state.status.groups || [], contacts: this.getData().contacts || [] });
+      if (r.matches) return tell(`😈 "${p.target}" matches more than one chat:\n${r.matches.join('\n')}\nUse the full name.`);
+      if (r.none) return tell(`😈 No group or contact called "${p.target}". Groups show up after the bot has seen them; people must be in panel Contacts.`);
+      jid = r.to.type === 'group' ? r.to.id : numberJid(normalizeNumber(r.to.number));
+    } else if (it.selfChat) return tell(`😈 Type it IN the chat you want to troll, or name it here:\n${prefix}troll @<group or contact name> <count> <text>`);
+    return this.startTroll(jid, p.text, p.count, tell, { capped: p.capped, announce: !!p.target });
+  }
+
+  /** 😈 "Send" in the panel (settings.troll.job) → one burst, once per job id, only if tapped in the last 30 min. */
+  async trollJob() {
+    const d = this.getData(), S = d.settings, job = S.troll?.job, mem = this.state.memory;
+    if (!job?.id || S.troll?.enabled === false) return false;
+    mem.trollDone = mem.trollDone || [];
+    if (mem.trollDone.includes(job.id)) return false;
+    mem.trollDone = [...mem.trollDone, job.id].slice(-50);
+    const tell = (t) => this.toOwner(t, { report: true, title: 'Troll mode' }).catch(() => {});
+    if (Date.now() - (job.at || 0) > TROLL_LIMITS.jobMaxAgeMs) { log.info('Troll mode: panel job is older than 30 min — skipped'); return false; }
+    let jid = '';
+    if (job.to?.type === 'group') jid = job.to.id;
+    else if (job.to?.type === 'contact') { const c = d.contacts.find((x) => x.id === job.to.id); if (c?.number) jid = numberJid(normalizeNumber(c.number)); }
+    const text = String(job.text || '').trim();
+    if (!jid || !text) { await tell('😈 Troll mode: the chat or the text from the panel is missing — nothing sent.'); return false; }
+    const { count, capped } = clampCount(job.count);
+    if (!count) return false;
+    this.startTroll(jid, text, count, tell, { capped, announce: false });
+    return true;
   }
 
   async download(msgLike) {
@@ -631,11 +818,15 @@ export class Incoming {
         const lr = this.state.status.lastRun;
         return this.reply(it, `✅ ${S.botName} is linked.\nLast run: ${lr ? new Date(lr.startedAt).toISOString().slice(0, 16).replace('T', ' ') + ' UTC' : 'first run'}\nAway: ${isAwayActive(S, this.state.status, Date.now()) ? 'on' : 'off'}\nBusy: ${(() => { const b = busyNow(S, this.state.status, Date.now()); return b.active ? `on until ${busyTimeText(b.until, Date.now(), S.timezone)}` : 'off'; })()}\nClass: ${(() => { const b = busyNow(S, this.state.status, Date.now(), 'class'); return b.active ? `on till ${modeTimeText('class', b.until, Date.now(), S.timezone)}` : 'off'; })()}`, 'alert');
       }
+      if (cmd === 'troll') return this.trollCommand(it, S, rawArg(it.text, prefix), prefix);
+      if (this.admin.isAdminCommand(cmd)) return this.admin.command(it, S, cmd, arg, prefix); // 👮 !kick !add !mute !del !warn !link !setname !lock !slow !pin !poll !summary…
       if (cmd === 'voice' || cmd === 'clip') return this.voiceCommand(it, arg, prefix);
       if (cmd === 'note' || cmd === 'notes') return this.noteCommand(it, S, cmd, rawArg(it.text, prefix), prefix);
       if (cmd === 'text') { const q = this.quotedMsg(it); if (q?.message?.audioMessage) { const text = await transcribe(await this.download(q)); return this.reply(it, `🎤 ${text}`, 'alert'); } }
     }
     if (!F.commands) return;
+    // 🚩 !report: any member (reply to a message) → you get it in your own chat. Only in groups where you're admin.
+    if (cmd === 'report' && en.report !== false) return this.admin.report(it, S, prefix);
     // 📦 !projects / !project <name>: also for everyone VR Bot mode answers (it's VR's promo), not only the command picks
     if ((cmd === 'projects' || cmd === 'project') && en.projects !== false && (isOwner || inScope(featureScope(S, 'commands'), scopeCtx(it)) || (F.botMode && inScope(botScope(S), scopeCtx(it))))) {
       return this.reply(it, projectsCommand(S, arg, prefix));

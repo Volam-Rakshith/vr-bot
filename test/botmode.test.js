@@ -36,7 +36,8 @@ globalThis.fetch = async (url, opts = {}) => {
 };
 const groqCalls = () => calls.filter((c) => c.url.includes('api.groq.com'));
 const groqAnswer = (content, extra = {}) => json({ choices: [{ message: { content, ...extra } }] });
-beforeEach(() => { calls = []; routes = []; env.groqKey = ''; });
+const { useLimitStore } = await import('../src/features/groqlimit.js');
+beforeEach(() => { calls = []; routes = []; env.groqKey = ''; env.groqKeyBot = ''; useLimitStore(null); }); // fresh Groq-limit store per test
 
 /* ---------------- triggers ---------------- */
 test('botmode: triggers — "hey vr bot", "@vrbot", "vr bot ra", "bot,", trailing "… vr bot?"; never "robot"/"botany"/"bot is"', () => {

@@ -34,7 +34,7 @@ GitHub Actions does the work · GitHub Pages hosts your phone control panel.</p>
 | 🎙️ | **Your own voice notes** — record or upload clips (panel) or `!voice save` in WhatsApp; a keyword rule or a schedule sends one as a real voice note | Within seconds (Always on) |
 | 🧠 | **AI replies in your style** (Groq free API) — style prompt + example chats + memory | ⏱ Next check |
 | 🌙 | **Away mode** — message + optional night window, `!away` / `!back` from WhatsApp | ⏱ Next check |
-| 🛡️ | **Group tools** — welcome new members, anti-link (warn / delete / remove if admin), `!tagall`, `!rules` | ⏱ Next check |
+| 🛡️ | **Group tools** — welcome & goodbye, warns → auto-kick, anti-spam, bad-word filter, slow mode, night lock, anti-link (off by default), `!tagall`, `!rules`, `!report` | ⏱ Next check |
 | ⌨️ | **Commands** — `!sticker` `!pdf` `!weather` `!help` `!yt` (experimental) | ⏱ Next check |
 | 📝 | **Notes** — `!note buy charger`, or reply `!note` to any message, link or forward to save it (with who sent it). `!notes` lists the last 10, `!note delete 3` removes one. Panel → More → 📝 Notes: search, open links, copy, delete, add | Within seconds (Always on) |
 | 🎨 | **Panel looks** — More → 🎨 Appearance: Classic, Glassmorphism, Neumorphism, Claymorphism, Neo-Brutalism, Bento Grid, Skeuomorphism, Aurora, Retro Windows / Mac OS, Isometric, Kinetic type; light/dark where it fits. Saved on each phone | Instantly |
@@ -88,8 +88,9 @@ GitHub Pages is free only for **public** repos, and Actions minutes are free and
 
 ## ⌨️ Commands (in WhatsApp)
 
-Everyone (switchable): `!help` · `!weather Hyderabad` · `!sticker` (on/reply to an image or short video) · `!pdf` (send images, then `!pdf`) · `!yt <link>` (experimental, off) · in groups: `!tagall <msg>` (admins) · `!rules`
+Everyone (switchable): `!help` · `!weather Hyderabad` · `!sticker` (on/reply to an image or short video) · `!pdf` (send images, then `!pdf`) · `!yt <link>` (experimental, off) · in groups: `!tagall <msg>` (admins) · `!rules` · `!report` (reply to a message; groups where you're admin)
 Only you (from your own phone or "Message yourself"): `!away <msg>` · `!back` · `!pause` · `!resume` · `!status` · `!text` (reply to a voice note) · `!busy 2h` / `!busy 30m` / `!busy until 5pm` / `!busy off` · `!class 2h` / `!class till 4` / `!class` (1 hour) · `!free` (ends busy or class) · `!voice save <name>` (reply to a voice note) / `!voice list` / `!voice play <name>` / `!voice delete <name>` · `!note <text>` (or reply `!note` to any message) / `!notes` / `!notes <word>` / `!note delete <n>`
+Group admin, only you, typed inside a group where your number is admin (otherwise: "I need admin in this group for that"): `!kick @user` (or reply) · `!add 91XXXXXXXXXX` · `!mute` / `!mute 30m` / `!mute 2h` / `!unmute` · `!del` (reply) · `!warn @user` / `!warns @user` / `!unwarn @user` (kick at "Warns before kick", per group) · `!link` / `!resetlink` · `!setname <name>` / `!setdesc <text>` · `!lock 23:00-07:00` / `!lock off` · `!slow 30` / `!slow off` · `!pin` (reply; `24h` / `7d` / `30d`) / `!unpin` · `!poll Question | a | b` · `!summary` / `!summary 100` / `!summary here`
 
 ## 🔔 Website contact form → WhatsApp
 

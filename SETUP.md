@@ -50,6 +50,7 @@ Go slowly, one step at a time. Every step ends with a ✅ check so you know it w
 | `BOT_NUMBER` | The WhatsApp number the bot will use, country code + number, digits only: `91XXXXXXXXXX` | **Required** |
 | `OWNER_NUMBER` | The number that receives alerts, summaries and failure messages, same format. Skip it if it's the same as `BOT_NUMBER` (then they arrive in your "Message yourself" chat). | Optional |
 | `GROQ_API_KEY` | For AI replies and voice-to-text — see step 12. | Optional |
+| `GROQ_API_KEY_BOT` | A second Groq key used only by VR Bot mode (falls back to `GROQ_API_KEY`) — see step 12. | Optional |
 
 ✅ You see `VR_PASSPHRASE` and `BOT_NUMBER` in the list (values are hidden — that's normal).
 
@@ -137,6 +138,11 @@ From now on the bot runs by itself, all day (Always on). You never need to touch
 1. Go to **console.groq.com** → sign in (Google or GitHub, no card) → **API Keys** → **Create API Key** → copy.
 2. GitHub → **Settings → Secrets and variables → Actions → New repository secret** → name `GROQ_API_KEY`, paste.
 3. Panel → **Replies** → turn on **AI replies**, write your style and 2–3 example chats → **Save replies**. Voice notes: **Settings → Voice note → text**.
+4. Optional: `GROQ_API_KEY_BOT` = a second key used only by VR Bot mode (falls back to `GROQ_API_KEY`). Make it the same way (ideally from a second Groq account, so each has its own free daily limit) and add it as a secret with that name.
+
+😈 Troll mode (owner only): panel → **More → 😈 Troll mode**, or in WhatsApp `!troll 10 wake up` (typed in the chat) / `!troll @<group or contact> 10 wake up` / `!troll stop` — max 50 per burst, 3 bursts per 10 min.
+
+When a free limit is used up, VR Bot mode tells that chat once ("back in ~2h 15m"); "as you" AI replies stay silent and you get one notification. Both pick up again by themselves when Groq's limit resets.
 
 Free plan (checked Oct 31 2026, console.groq.com/docs/rate-limits): `openai/gpt-oss-120b` 30 requests/min, 1,000/day, 8K tokens/min, 200K tokens/day; `qwen/qwen3.8-27b` (reads photos) the same; Whisper 20 requests/min, 2,000/day.
 

@@ -13,6 +13,7 @@ export const env = {
   botNumber: normalizeNumber(process.env.BOT_NUMBER || ''),
   ownerNumber: normalizeNumber(process.env.OWNER_NUMBER || process.env.BOT_NUMBER || ''),
   groqKey: process.env.GROQ_API_KEY || '',
+  groqKeyBot: process.env.GROQ_API_KEY_BOT || '', // optional 2nd key, used only by VR Bot mode (falls back to GROQ_API_KEY)
   githubToken: process.env.GITHUB_TOKEN || '',
   repo: process.env.GITHUB_REPOSITORY || '',
   dataBranch: process.env.VR_DATA_BRANCH || process.env.GITHUB_REF_NAME || 'main',

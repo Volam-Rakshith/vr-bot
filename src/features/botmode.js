@@ -9,13 +9,19 @@
 import { env } from '../env.js';
 import { BOT_LIMITS, htmlToText, youtubeId, isPrivateHost, tidyReply, sourcesLine, topicOf, buildBotMessages, unsafeImagePrompt, bossAsk, publicFacts } from '../../panel/shared/botmode.js';
 import { brandOf, renderProjectList, renderProject } from '../../panel/shared/projects.js';
+import { botKey, botKeyId, checkLimit, noteLimit, limitedUntil, humanTime } from './groqlimit.js';
 
 const GROQ = 'https://api.groq.com/openai/v1/chat/completions';
 const UA = 'VR-Bot/1.0 (+https://github.com/Volam-Rakshith/vr-bot; WhatsApp assistant by VR DEVELOPMENTS)';
 const WIKI = 'https://en.wikipedia.org';
 
 export class NoKeyError extends Error { constructor() { super('GROQ_API_KEY secret is not set'); this.noKey = true; } }
-const hasKey = () => !!env.groqKey;
+/** VR Bot mode's key: GROQ_API_KEY_BOT if set, else GROQ_API_KEY ("missing" only when both are). */
+const hasKey = () => !!botKey();
+/** The key is there but Groq's free limit is used up right now → until (ms), else 0. */
+const limited = () => (hasKey() ? limitedUntil(botKeyId()) : 0);
+/** The one "limit used up" line (sent at most once per chat per limit window — see Incoming.botMode). */
+export const LIMIT_MSG = (until, now = Date.now()) => `🤖 VR Bot's free AI limit is used up for now — back in ~${humanTime(until - now)}. Try again later!`;
 
 /** fetch with a deadline (AbortSignal) — every network call here has one. */
 async function get(url, { ms = BOT_LIMITS.fetchMs, headers = {}, redirect = 'follow' } = {}) {
@@ -46,15 +52,18 @@ export async function readCapped(res, maxBytes) {
 /** One chat completion. Returns { text, sources }. Throws NoKeyError without the key. */
 export async function groqChat({ model, messages, maxTokens = 900, tools, temperature = 0.7 }) {
   if (!hasKey()) throw new NoKeyError();
+  const keyId = botKeyId();
+  checkLimit(keyId); // limit used up earlier → no call until it resets
   const body = { model, messages, temperature, max_completion_tokens: maxTokens };
   if (/gpt-oss/.test(model)) { body.reasoning_effort = 'low'; body.include_reasoning = false; }
   if (tools) body.tools = tools;
   const res = await fetch(GROQ, {
     method: 'POST',
-    headers: { Authorization: `Bearer ${env.groqKey}`, 'Content-Type': 'application/json' },
+    headers: { Authorization: `Bearer ${botKey()}`, 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(tools ? 60000 : 40000),
   });
+  if (res.status === 429) throw noteLimit(keyId, res.headers, await res.text().catch(() => ''));
   if (!res.ok) { const e = new Error(`Groq ${res.status}: ${(await res.text()).slice(0, 200)}`); e.status = res.status; throw e; }
   const j = await res.json();
   const msg = j.choices?.[0]?.message || {};
@@ -189,6 +198,7 @@ export async function answerBot({ S, cfg, intent, question, history = [], isGrou
   const text = (t, extra = {}) => ({ out: [{ text: t }], ...extra });
   const max = cfg.maxLines || 12;
   const sys = (extra) => buildBotMessages(cfg, S, history, question, { aboutMe, isGroup, extra });
+  const limitText = (until, error) => ({ out: [{ text: LIMIT_MSG(until) }], limited: until, ...(error ? { error } : {}) });
   const chat = async (extra, opts = {}) => { const r = await groqChat({ model: cfg.model, messages: sys(extra), maxTokens: opts.maxTokens || 900, tools: opts.tools }); return r; };
   try {
     switch (intent.type) {
@@ -198,7 +208,7 @@ export async function answerBot({ S, cfg, intent, question, history = [], isGrou
         return text(intent.all ? renderProjectList(S, { limit: 0 }) : renderProjectList(S, { limit: 5, moreHint: isGroup ? `Say "${trig} more" for all of them 👀` : undefined }), { projectsList: !intent.all });
       case 'project': {
         const p = intent.project;
-        if (intent.simple || !hasKey() || !allow.chat) return text(renderProject(S, p));
+        if (intent.simple || !hasKey() || limited() || !allow.chat) return text(renderProject(S, p));
         const r = await chat(`The friend asks about ${boss}'s project "${p.name}". Use ONLY its line from the project list, never invent features. End with its exact link${p.link ? ` (${p.link})` : ''}.`, { maxTokens: 600 });
         if (!r.text) return text(renderProject(S, p));
         const t = tidyReply(r.text, max);
@@ -224,6 +234,7 @@ export async function answerBot({ S, cfg, intent, question, history = [], isGrou
         if (!allow.vision) return text(`🤖 Reading photos is switched off for now.`);
         if (!image) return text(`🤖 Send the photo with the caption "${trig} what's this?" (or reply to the photo with it).`);
         if (!hasKey()) return text(`${NO_AI(S)}\nSo I can't look at photos yet.`, { noKey: true });
+        if (limited()) return limitText(limited());
         const buf = await image();
         const r = await describeImage(buf, intent.question || 'What is in this picture?', { model: cfg.visionModel || 'qwen/qwen3.8-27b', system: buildBotMessages(cfg, S, [], '', { aboutMe, isGroup, extra: 'The user sent a photo. Describe or answer about it. If it shows a study question or code, explain or solve it step by step. If you are not sure what something is, say so. Never guess who a real person in a photo is.' })[0].content });
         return { out: [{ text: `🤖 ${tidyReply(r.text, max)}` }], ai: true };
@@ -234,7 +245,7 @@ export async function answerBot({ S, cfg, intent, question, history = [], isGrou
         let page;
         try { page = await fetchPage(url); } catch (e) { return text(`🤖 Couldn't open that link (${e.message}) 😕`); }
         const head = page.kind === 'youtube' ? `🎬 *${page.title}*${page.author ? ` — ${page.author}` : ''}` : page.title ? `📄 *${page.title}*` : '';
-        if (!hasKey() || page.kind === 'image' || page.kind === 'file') {
+        if (!hasKey() || limited() || page.kind === 'image' || page.kind === 'file') {
           const desc = page.description || (page.text || '').slice(0, 300);
           const body = page.kind === 'image' ? '🖼️ That link is a picture.' : page.kind === 'file' ? `📎 That link is a file (${page.description}).` : [head, desc].filter(Boolean).join('\n') || 'Opened it, but there is no readable text on that page.';
           return text(`🤖 ${body}${sourcesLine([page.url])}`, { noKey: !hasKey() && page.kind !== 'image' && page.kind !== 'file' });
@@ -247,8 +258,8 @@ export async function answerBot({ S, cfg, intent, question, history = [], isGrou
         return { out: [{ text: `🤖 ${tidyReply(r.text, max)}${sourcesLine([page.url])}` }], ai: true, sources: [page.url] };
       }
       case 'web': {
-        if (!allow.web) return answerChat();
-        if (hasKey()) {
+        if (!allow.web) return await answerChat();
+        if (hasKey() && !limited()) {
           try {
             const r = await chat('Search the web for current information when needed. Mention dates for news. Keep it short.', { tools: [{ type: 'browser_search' }], maxTokens: 1200 });
             if (r.text) return { out: [{ text: `🤖 ${tidyReply(r.text, max)}${sourcesLine(r.sources)}` }], ai: true, sources: r.sources };
@@ -256,27 +267,32 @@ export async function answerBot({ S, cfg, intent, question, history = [], isGrou
         }
         const w = await wikiSummary(topicOf(question)).catch(() => null);
         if (w) return text(`🤖 *${w.title}*\n${tidyReply(w.extract, Math.min(6, max))}${sourcesLine([w.url])}`, { noKey: !hasKey(), sources: [w.url] });
-        return hasKey() ? answerChat() : text(`${NO_AI(S)}\nSo I can't look that up yet.`, { noKey: true });
+        return hasKey() ? await answerChat() : text(`${NO_AI(S)}\nSo I can't look that up yet.`, { noKey: true });
       }
-      default: return answerChat();
+      default: return await answerChat(); // awaited, so a Groq error lands in the catch below
     }
   } catch (e) {
     if (e.noKey) return text(`${NO_AI(S)}\n${TRY(trig)}`, { noKey: true });
+    if (e.rateLimit) return limitText(e.until, e.message);
     if (e.status === 429 || e.status === 413) return text('🤖 Too many questions right now 😅 try again in a minute.', { error: e.message });
     return text('🤖 Oops, something went wrong on my side 😅 try again in a bit.', { error: e.message });
   }
 
   async function answerChat() {
     if (!allow.chat) return text(`🤖 Chatting is switched off for now.`);
-    if (!hasKey()) {
+    const until = limited();
+    if (!hasKey() || until) {
+      // no key, or the free limit is used up: the fixed-text answers still work
+      const tag = until ? {} : { noKey: true };
       if (bossAsk(question)) {
         const f = publicFacts(aboutMe);
-        return text(`🤖 I'm *${name}* by ${brand.company}, ${boss}'s assistant bot.${f ? `\nAbout my boss:\n${f}` : ''}\nSee what he built: "${trig} show ${brand.owner}'s projects"`, { noKey: true });
+        return text(`🤖 I'm *${name}* by ${brand.company}, ${boss}'s assistant bot.${f ? `\nAbout my boss:\n${f}` : ''}\nSee what he built: "${trig} show ${brand.owner}'s projects"`, tag);
       }
       if (/^(explain|what|who|tell (me|us) (about|abt)|define|meaning|history|summary|info)/i.test(topicOfRaw(question))) {
         const w = await wikiSummary(topicOf(question)).catch(() => null);
-        if (w) return text(`🤖 *${w.title}*\n${tidyReply(w.extract, Math.min(6, max))}${sourcesLine([w.url])}`, { noKey: true, sources: [w.url] });
+        if (w) return text(`🤖 *${w.title}*\n${tidyReply(w.extract, Math.min(6, max))}${sourcesLine([w.url])}`, { ...tag, sources: [w.url] });
       }
+      if (until) return limitText(until);
       return text(`${NO_AI(S)}\n${TRY(trig)}`, { noKey: true });
     }
     const r = await chat('');

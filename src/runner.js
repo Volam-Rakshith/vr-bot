@@ -39,7 +39,7 @@ export async function run({ inbox = [] } = {}) {
   const via = process.env.VR_VIA || '';
   const rec = { startedAt: t0, trigger: via === 'chain' ? 'always-on' : via === 'watchdog' ? 'watchdog' : env.eventName === 'workflow_dispatch' ? `manual:${env.action}` : env.eventName, sent: 0, failed: 0, received: 0, late: 0, notes: [] };
   log.info(`VR Bot run started (${rec.trigger}). Timezone ${S0.timezone}, look-ahead ${T.lookaheadMinutes} min.`);
-  state.status.groq = { key: !!env.groqKey, at: t0 }; // the panel shows "add the free Groq key" when false (never the key itself)
+  state.status.groq = { key: !!(env.groqKey || env.groqKeyBot), main: !!env.groqKey, bot: !!env.groqKeyBot, at: t0 }; // the panel shows "add the free Groq key" when key is false (never the key itself)
   log.endGroup();
 
   let notifier = null;
@@ -74,10 +74,10 @@ export async function run({ inbox = [] } = {}) {
   notifier = new Notifier({ getData, state, me: () => { try { return wa.me(); } catch { return ''; } }, owner: env.ownerNumber });
   await notifier.checkTest();
   const send = async (jid, content, opts = {}) => {
-    const { kind, cat, to, label, clip, ...rest } = opts;
+    const { kind, cat, to, label, clip, quiet, ...rest } = opts;
     const r = await wa.send(jid, content, rest);
     if (r?.key?.id) state.memory.sentIds.push(r.key.id);
-    if (jid !== 'status@broadcast') notifier.sent(jid, content, { kind, cat, to, label, clip });
+    if (jid !== 'status@broadcast' && !quiet) notifier.sent(jid, content, { kind, cat, to, label, clip }); // quiet: troll bursts (one summary instead of 50 entries)
     return r;
   };
   // 🎙️ your voice clips (encrypted on the vr-voice branch, src/features/voice.js)
@@ -158,6 +158,7 @@ export async function run({ inbox = [] } = {}) {
   await wa.waitPending(30000);
   rec.received += await incoming.drain();
   await incoming.busyTick();
+  await incoming.adminTick(); // 👮 !mute 30m timers + night lock (!lock 23:00-07:00)
   log.info(`Handled ${rec.received} new message(s)`);
   log.endGroup();
 
@@ -332,6 +333,7 @@ export async function run({ inbox = [] } = {}) {
   let lastYieldCheck = Date.now(), downSince = 0, endWant = null, endReason = '';
   if (alwaysOn()) log.info('Always on: this run stays connected and hands over to the next run before it ends');
 
+  await incoming.trollJob().catch((e) => log.warn(`troll: ${e.message}`)); // 😈 a Troll mode job from the panel
   let jobs = plan();
   log.info(`${jobs.length} message(s) due in this window`);
   while (true) {
@@ -342,6 +344,7 @@ export async function run({ inbox = [] } = {}) {
       if (voices.loaded || usesVoice(data_)) await voices.refresh(); // clips added in the panel (and converts uploaded mp3/m4a once)
       lastRefresh = now;
       await notifier.checkTest(); // "Send test notification" tapped in the panel
+      await incoming.trollJob().catch((e) => log.warn(`troll: ${e.message}`)); // 😈 "Send" tapped in the panel
     }
     jobs = plan();
     const due = jobs.filter((j) => j.at <= Date.now() + 1000);
@@ -351,6 +354,7 @@ export async function run({ inbox = [] } = {}) {
     }
     rec.received += await incoming.drain();
     await incoming.busyTick();
+    await incoming.adminTick(); // 👮 !mute 30m timers + night lock (!lock 23:00-07:00)
     if (now - lastCheckpoint > 10 * 60000) { state.logs.entries.push(...log.drain()); persistLocal(state); await pushState('checkpoint').catch((e) => log.warn(`checkpoint: ${e.message}`)); lastCheckpoint = Date.now(); }
     const next = plan().find((j) => j.at > Date.now() + 1000);
     const onlineLongEnough = Date.now() - t0 >= T.minOnlineSeconds * 1000;

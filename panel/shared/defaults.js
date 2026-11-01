@@ -48,10 +48,14 @@ export const DEFAULT_SETTINGS = {
     exclude: [],            // contact ids that never get AI replies (wins over "who", also in groups)
     excludeTags: [],        // lists (tags) that never get AI replies
     groups: 'none',         // none | [group ids]: AI answers in those groups only when someone @mentions or replies to you
+    groupReplyAll: false,   // true = in the picked groups answer EVERY message (not only @mentions / replies to you)
+    groupCooldownSec: 60,   // with groupReplyAll: at most one AI reply per group every N seconds (min 15)
     react: false,           // also let the AI add a fitting emoji reaction (❤️ 👍 😂 😮 😢 🙏 🔥 🎉)
     memory: 8,              // remember the last N messages per chat
     maxPerChatPerDay: 15,
   },
+  // 😈 Troll mode (More → Troll mode, or !troll in WhatsApp): owner only. job = the panel's one-shot "Send" (picked up on the next check)
+  troll: { enabled: true, job: null },
   // 🤖 VR Bot mode (Replies → VR Bot mode) — triggers, what it may do, who, daily caps. See shared/botmode.js
   botMode: JSON.parse(JSON.stringify(BOT_DEFAULTS)),
   // 📦 VR DEVELOPMENTS projects VR Bot mode may promote (editable: Replies → 🤖 VR Bot mode → 📦 Projects)
@@ -70,7 +74,12 @@ export const DEFAULT_SETTINGS = {
     contacts: [], tags: [],
     inGroups: true,
     groups: 'all',          // all (same people as above) | none | [group ids] (anyone in those groups)
-    enabled: { help: true, weather: true, sticker: true, pdf: true, yt: false, tagall: true, rules: true, projects: true }, // projects: !projects / !project <name>
+    enabled: {
+      help: true, weather: true, sticker: true, pdf: true, yt: false, tagall: true, rules: true, projects: true, // projects: !projects / !project <name>
+      report: true, // !report: any member, in groups where you're admin
+      // 👮 group admin commands (only you; need your number to be group admin): panel → Settings → Commands → Group admin
+      kick: true, add: true, mute: true, del: true, warn: true, link: true, setname: true, setdesc: true, lock: true, slow: true, pin: true, poll: true, summary: true,
+    },
   },
   voice: { sendTo: 'owner', maxSeconds: 300, who: 'everyone', contacts: [], tags: [] }, // owner = transcript goes to you; chat = reply in that chat
   media: { statuses: false, chats: true, maxFileMB: 3, totalCapMB: 300, types: ['image', 'audio', 'video', 'document'],
